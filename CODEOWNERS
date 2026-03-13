@@ -1,0 +1,22 @@
+# Location: fork
+# Language: typescript
+
+# Core + org context snapshots
+docs/_core/** @core-owner
+docs/org_context/** @org-owners
+
+# Repo-local planning, decisions, and governance
+README.md @tryinget
+next_session_prompt.md @tryinget
+docs/project/** @tryinget
+docs/system4d/** @tryinget
+docs/decisions/** @tryinget
+diary/** @tryinget
+governance/** @tryinget
+policy/** @tryinget
+ontology/** @tryinget
+
+# Code + automation
+scripts/** @tryinget
+src/** @tryinget
+tests/** @tryinget

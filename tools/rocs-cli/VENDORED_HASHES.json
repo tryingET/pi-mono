@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "upstream_project": "ai-society/core/rocs-cli",
+  "upstream_version": "0.1.4",
+  "files": {
+    "pyproject.toml": "6991516c649f857d673feda2ad2818b9f5a0851d4a8c2bb88d78e2bda239b1dd",
+    "README.md": "b7ac862490a7ca8faaaf783fdf6d189dd062ef2e38128dae5394951d84b436c3",
+    "src/rocs_cli/__init__.py": "2f4c7193a3252d1cda8b4febd253379016ab8bb9b12c019444440a0edeb97c9d",
+    "src/rocs_cli/__main__.py": "9ba623e8eaa92c1a23fb0c295c3646adb412026a263006abf602e6716880e52e",
+    "src/rocs_cli/cache.py": "caef1f3a31abcc3d1c5eb4ddc84f016af2cd8b7deef2c3ed7d30c8427e1117a5",
+    "src/rocs_cli/cli.py": "d38bbe0e341ff5f94d3e6865db3f2d1233d9d045ec931dc2475423f3df27efc4",
+    "src/rocs_cli/cli_signature.py": "d1656b2210cf3efcc54b36b7a24599f22a8b6ed534098c6afd0a9f943e17e50c",
+    "src/rocs_cli/frontmatter.py": "dc98f6cd0225285d59d281798f6b3794df63bac8db74b775d473719a3136683f",
+    "src/rocs_cli/gitlab.py": "42823626a2eb915ba8a3644b60bfdd67b2ba56fea06d8d7383ce5e1faa09085d",
+    "src/rocs_cli/graph.py": "7895649d7851832f92507b071e88d9cadbad5304df1e000a2f5422a91b286808",
+    "src/rocs_cli/id_index.py": "ea9f2a20c00c284c8df52e9ab2f669983c5d26f08acf2e924589e2e88341921d",
+    "src/rocs_cli/inverses.py": "a06d60ac4067e12e2ee7b4f031c7e6373b7c516703198f30009b64427380fe8b",
+    "src/rocs_cli/layers.py": "e732fd7954773305e63795924f8c30cd3408c53539dcc43610ad572da128e6a2",
+    "src/rocs_cli/lint.py": "737ab98efb21a50cc5935666c8d85068a7169e882d5a23265445fe4cb79f6f4b",
+    "src/rocs_cli/model.py": "9a5dae09c2098d7f1c9dd056b08ff9f4aa761c2e5c62ae6d3d7b2830b4b7b6b5",
+    "src/rocs_cli/normalize.py": "454d580edc85f33479ca75fa9fca55c2b74e7ae0a93590768c2e6f8a95edd7b9",
+    "src/rocs_cli/pack.py": "28b99d529c76002691d3c4abe81277f7a024dc393e424fb2caf7644934c9b43a",
+    "src/rocs_cli/rules.py": "718515e564ee501aecd60682b60ba431ca932eefb14be54ee792b0e2b7759ad7",
+    "src/rocs_cli/validate.py": "d94b8a185d87f4fb62ac65a83e4cf100fb61dc835040c98fa472a2e759651b52",
+    "src/rocs_cli/vendored.py": "36da72ad471769a8453bbfc949e666243dcf313fcb6fd8e79f47c2e8b982a128"
+  }
+}

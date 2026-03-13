@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-03-13",
+  "owner": "@tryinget",
+  "project_name": "pi-mono",
+  "milestones": [
+    {
+      "id": "M1",
+      "title": "Fork bootstrap and boundary framing",
+      "issues": [
+        {
+          "id": "I1",
+          "title": "Bootstrap softwareco/fork/pi-mono as the first concrete fork repo",
+          "state": "done",
+          "tasks": [
+            {
+              "text": "Create the repo under softwareco/fork using the company control-plane scaffold",
+              "done": true
+            },
+            {
+              "text": "Normalize the repo for fork-lane reality and pi-mono context",
+              "done": true
+            },
+            {
+              "text": "Capture why the fork exists in repo-local docs and decisions",
+              "done": true
+            }
+          ],
+          "dod": "A concrete repo exists at softwareco/fork/pi-mono with fork-specific docs, work-items, and initial git history.",
+          "labels": [
+            "bootstrap",
+            "fork",
+            "dspy"
+          ],
+          "assignee": "@tryinget",
+          "completed_at": "2026-03-13",
+          "note": "Completed from agent-kernel task #25 after the upstream DSPY line was closed locally."
+        },
+        {
+          "id": "I2",
+          "title": "Decide upstream import and sync posture for badlogic/pi-mono",
+          "state": "queued",
+          "tasks": [
+            {
+              "text": "Choose whether the first seed is a mirror import, filtered import, or manual bootstrap",
+              "done": false
+            },
+            {
+              "text": "Document remote naming, sync cadence, and merge/rebase posture",
+              "done": false
+            },
+            {
+              "text": "Define what evidence is required before local divergence begins landing on top of imported code",
+              "done": false
+            }
+          ],
+          "dod": "One accepted repo-local decision defines how upstream code enters this fork and how future syncs are performed.",
+          "labels": [
+            "upstream",
+            "sync",
+            "governance"
+          ],
+          "assignee": "@tryinget"
+        }
+      ]
+    },
+    {
+      "id": "M2",
+      "title": "Post-upstream DSPY execution planning",
+      "issues": [
+        {
+          "id": "I3",
+          "title": "Map the abandoned upstream DSPY asks into a local execution backlog",
+          "state": "queued",
+          "tasks": [
+            {
+              "text": "Translate the issue-tracker DSPY proposal set into repo-local capability buckets",
+              "done": false
+            },
+            {
+              "text": "Identify the minimum first slice that should land after upstream import/sync is defined",
+              "done": false
+            }
+          ],
+          "dod": "The former upstream DSPY asks are represented as a local, actionable backlog in this repo.",
+          "labels": [
+            "dspy",
+            "planning"
+          ],
+          "assignee": "@tryinget"
+        },
+        {
+          "id": "I4",
+          "title": "Pick the first bounded implementation slice for local fork work",
+          "state": "queued",
+          "tasks": [
+            {
+              "text": "Choose the narrowest high-leverage enabler from the DSPY set",
+              "done": false
+            },
+            {
+              "text": "Define validation expectations for that slice before code work begins",
+              "done": false
+            }
+          ],
+          "dod": "One DSPY-related implementation slice is ready to execute with explicit validation expectations.",
+          "labels": [
+            "dspy",
+            "execution"
+          ],
+          "assignee": "@tryinget"
+        }
+      ]
+    }
+  ]
+}
