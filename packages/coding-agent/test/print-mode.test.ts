@@ -108,6 +108,24 @@ describe("runPrintMode", () => {
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
 
+	it("honors an extension shutdown request before the first prompt", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage());
+		const { session } = runtimeHost;
+		session.bindExtensions.mockImplementation(async (bindings) => {
+			bindings.shutdownHandler?.();
+		});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "must not run",
+			messages: ["also must not run"],
+		});
+
+		expect(exitCode).toBe(0);
+		expect(session.prompt).not.toHaveBeenCalled();
+		expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
+	});
+
 	it("emits session_shutdown in json mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;

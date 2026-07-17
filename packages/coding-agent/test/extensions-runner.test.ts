@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { EXTENSION_HOST_CAPABILITIES } from "../src/core/extensions/host-capabilities.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner, emitProjectTrustEvent } from "../src/core/extensions/runner.ts";
 import type {
@@ -16,6 +17,7 @@ import type {
 	ExtensionUIContext,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
+import { wrapRegisteredTool } from "../src/core/extensions/wrapper.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -123,6 +125,7 @@ describe("ExtensionRunner", () => {
 				extensionsResult,
 				{ type: "project_trust", cwd: tempDir },
 				{
+					hostCapabilities: EXTENSION_HOST_CAPABILITIES,
 					cwd: tempDir,
 					mode: "tui",
 					hasUI: false,
@@ -141,6 +144,29 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("shortcut conflicts", () => {
+		it("passes the guarded host identity and shutdown action to shortcut handlers", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "host-shortcut.ts"),
+				`export default function(pi) {
+					pi.registerShortcut("ctrl+shift+x", {
+						description: "Host shortcut",
+						handler: async (ctx) => {
+							if (ctx.hostCapabilities.extension_api_version !== "1.0.0") throw new Error("host identity absent");
+							ctx.shutdown();
+						},
+					});
+				}`,
+			);
+			const shutdown = vi.fn();
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, { ...extensionContextActions, shutdown });
+			const shortcut = runner.getShortcuts(defaultKeybindings).get("ctrl+shift+x");
+
+			expect(shortcut).toBeDefined();
+			await shortcut!.handler(runner.createContext());
+			expect(shutdown).toHaveBeenCalledTimes(1);
+		});
 		it("warns when extension shortcut conflicts with built-in", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -371,6 +397,35 @@ describe("ExtensionRunner", () => {
 
 			expect(tools.length).toBe(2);
 			expect(tools.map((t) => t.definition.name).sort()).toEqual(["tool_a", "tool_b"]);
+		});
+
+		it("passes the guarded host identity to wrapped extension tools", async () => {
+			fs.writeFileSync(
+				path.join(extensionsDir, "host-tool.ts"),
+				`import { Type } from "typebox";
+				export default function(pi) {
+					pi.registerTool({
+						name: "host_tool",
+						label: "host_tool",
+						description: "Host identity tool",
+						parameters: Type.Object({}),
+						execute: async (_id, _params, _signal, _update, ctx) => ({
+							content: [{ type: "text", text: ctx.hostCapabilities.extension_api_version }],
+							details: {},
+						}),
+					});
+				}`,
+			);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const registered = runner.getAllRegisteredTools()[0];
+			runner.bindCore(extensionActions, extensionContextActions);
+			expect(registered).toBeDefined();
+			const wrapped = wrapRegisteredTool(registered!, runner);
+			const output = await wrapped.execute("call-1", {}, undefined, undefined);
+
+			expect(output.content).toEqual([{ type: "text", text: "1.0.0" }]);
 		});
 
 		it("keeps first tool when two extensions register the same name", async () => {
@@ -686,6 +741,7 @@ describe("ExtensionRunner", () => {
 			const extCode1 = `
 				export default function(pi) {
 					pi.on("before_agent_start", async (_event, ctx) => {
+						if (ctx.hostCapabilities.extension_api_version !== "1.0.0") throw new Error("host identity absent");
 						return {
 							systemPrompt: ctx.getSystemPrompt() + "\\nfirst",
 						};
@@ -695,6 +751,7 @@ describe("ExtensionRunner", () => {
 			const extCode2 = `
 				export default function(pi) {
 					pi.on("before_agent_start", async (_event, ctx) => {
+						if (!ctx.hostCapabilities.capabilities.includes("prompt.system.chain.v1")) throw new Error("capability absent");
 						return {
 							systemPrompt: ctx.getSystemPrompt() + "\\nsecond",
 						};

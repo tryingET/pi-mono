@@ -60,6 +60,7 @@ import {
 	computeCacheWaste,
 	detectCacheMiss,
 } from "../../core/cache-stats.ts";
+import { attachExtensionHostCapabilities } from "../../core/extensions/host-capabilities.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -1754,39 +1755,9 @@ export class InteractiveMode {
 		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 		if (shortcuts.size === 0) return;
 
-		// Create a context for shortcut handlers
-		const createContext = (): ExtensionContext => ({
-			ui: this.createExtensionUIContext(),
-			mode: "tui",
-			hasUI: true,
-			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
-			modelRegistry: extensionRunner.getModelRegistry(),
-			model: this.session.model,
-			isIdle: () => this.session.isIdle,
-			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-			signal: this.session.agent.signal,
-			abort: () => {
-				this.restoreQueuedMessagesToEditor({ abort: true });
-			},
-			hasPendingMessages: () => this.session.pendingMessageCount > 0,
-			shutdown: () => {
-				this.shutdownRequested = true;
-			},
-			getContextUsage: () => this.session.getContextUsage(),
-			compact: (options) => {
-				void (async () => {
-					try {
-						const result = await this.session.compact(options?.customInstructions);
-						options?.onComplete?.(result);
-					} catch (error) {
-						const err = error instanceof Error ? error : new Error(String(error));
-						options?.onError?.(err);
-					}
-				})();
-			},
-			getSystemPrompt: () => this.session.systemPrompt,
-		});
+		// Reuse the runner-owned context so shortcuts receive the same guarded,
+		// immutable host contract as tools, commands, and lifecycle handlers.
+		const createContext = (): ExtensionContext => extensionRunner.createContext();
 
 		// Set up the extension shortcut handler on the default editor
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
@@ -2098,7 +2069,7 @@ export class InteractiveMode {
 	 */
 	private createProjectTrustContext(cwd: string): ProjectTrustContext {
 		const ui = this.createExtensionUIContext();
-		return {
+		return attachExtensionHostCapabilities<Omit<ProjectTrustContext, "hostCapabilities">>({
 			cwd,
 			mode: "tui",
 			hasUI: true,
@@ -2108,7 +2079,7 @@ export class InteractiveMode {
 				input: ui.input,
 				notify: ui.notify,
 			},
-		};
+		});
 	}
 
 	private createExtensionUIContext(): ExtensionUIContext {

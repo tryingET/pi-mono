@@ -13,7 +13,12 @@ import {
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ModelRuntime } from "../../../src/core/model-runtime.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
+import {
+	EXTENSION_HOST_CAPABILITIES,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionFactory,
+} from "../../../src/index.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -152,6 +157,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		let staleCtxThrows = false;
 		let stalePiThrows = false;
 		let replacementSessionFile: string | undefined;
+		let replacementHostMatches = false;
 		let instanceId = 0;
 		const { runtime } = await createRuntimeForTest(
 			(pi) => {
@@ -173,6 +179,7 @@ describe("regression #2860: replaced session callbacks", () => {
 							withSession: async (replacedCtx) => {
 								events.push(`with:${currentInstance}`);
 								replacementSessionFile = replacedCtx.sessionManager.getSessionFile();
+								replacementHostMatches = replacedCtx.hostCapabilities === EXTENSION_HOST_CAPABILITIES;
 								try {
 									oldCtx?.sessionManager.getSessionFile();
 								} catch {
@@ -199,6 +206,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(events).toEqual(["start:1", "shutdown:1", "start:2", "with:1"]);
 		expect(replacementSessionFile).toBeDefined();
 		expect(replacementSessionFile).not.toBe(oldSessionFile);
+		expect(replacementHostMatches).toBe(true);
 		expect(staleCtxThrows).toBe(true);
 		expect(stalePiThrows).toBe(true);
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([

@@ -35,6 +35,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let disposed = false;
+	let shutdownRequested = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	const disposeRuntime = async (): Promise<void> => {
@@ -95,6 +96,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					await session.reload();
 				},
 			},
+			shutdownHandler: () => {
+				shutdownRequested = true;
+			},
 			onError: (err) => {
 				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
 			},
@@ -118,11 +122,12 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		await rebindSession();
 
-		if (initialMessage) {
+		if (initialMessage && !shutdownRequested) {
 			await session.prompt(initialMessage, { images: initialImages });
 		}
 
 		for (const message of messages) {
+			if (shutdownRequested) break;
 			await session.prompt(message);
 		}
 

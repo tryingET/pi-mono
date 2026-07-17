@@ -11,6 +11,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { attachExtensionHostCapabilities } from "./host-capabilities.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -665,7 +666,7 @@ export class ExtensionRunner {
 	createContext(): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
-		return {
+		const context: Omit<ExtensionContext, "hostCapabilities"> = {
 			get ui() {
 				runner.assertActive();
 				return runner.uiContext;
@@ -731,6 +732,7 @@ export class ExtensionRunner {
 				return runner.getSystemPromptFn();
 			},
 		};
+		return attachExtensionHostCapabilities(context, () => runner.assertActive());
 	}
 
 	createCommandContext(): ExtensionCommandContext {

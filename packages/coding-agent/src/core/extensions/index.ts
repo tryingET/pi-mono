@@ -4,6 +4,11 @@
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
+export type {
+	ExtensionHostCapabilities,
+	ExtensionHostCapability,
+} from "./host-capabilities.ts";
+export { EXTENSION_HOST_CAPABILITIES } from "./host-capabilities.ts";
 export {
 	createExtensionRuntime,
 	discoverAndLoadExtensions,

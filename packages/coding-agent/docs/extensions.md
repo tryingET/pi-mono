@@ -924,11 +924,41 @@ Transforms chain across handlers. See [input-transform.ts](../examples/extension
 
 ## ExtensionContext
 
-All handlers receive `ctx: ExtensionContext`.
+Runtime handlers receive `ctx: ExtensionContext`. `project_trust` runs before session construction and receives the deliberately restricted `ProjectTrustContext`; it exposes `hostCapabilities`, `cwd`, `mode`, `hasUI`, and a startup-safe UI subset, but not session or execution methods.
 
 ### ctx.ui
 
 UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
+
+### ctx.hostCapabilities
+
+Immutable host-owned extension protocol identity. Use `extension_api_version` and exact capability tokens for compatibility gates; `host_package` and `host_version` are provenance only.
+
+```typescript
+const required = [
+  "prompt.system.chain.v1",
+  "session.lifecycle.reason.v1",
+  "ui.mode.v1",
+  "ui.confirm.timeout.v1",
+  "session.shutdown.v1",
+] as const;
+
+const compatible =
+  ctx.hostCapabilities.extension_api_version === "1.0.0" &&
+  required.every((capability) => ctx.hostCapabilities.capabilities.includes(capability));
+```
+
+The object and capability array are frozen host singletons. They are not derived from environment variables, settings, repository files, or extension flags.
+
+| Token | Exact guarantee |
+|---|---|
+| `prompt.system.chain.v1` | For `before_agent_start`, handlers run in registration order. Each handler receives the current chained `event.systemPrompt`; `ctx.getSystemPrompt()` returns that same current value; a returned `systemPrompt` becomes the input to the next handler and the final agent prompt. |
+| `session.lifecycle.reason.v1` | Host-created `session_start` events carry the closed reason `startup`, `reload`, `new`, `resume`, or `fork` for the corresponding lifecycle transition. Replacement generations receive a fresh context; captured contexts from the replaced generation fail as stale. |
+| `ui.mode.v1` | `ctx.mode` is the exact active host mode: `tui`, `rpc`, `json`, or `print`. It is refreshed with the runner binding rather than inferred from terminal or repository state. |
+| `ui.confirm.timeout.v1` | On full `ExtensionContext` values, `ctx.ui.confirm(title, message, { timeout })` accepts milliseconds. In TUI and RPC (`ctx.hasUI === true`), expiry dismisses the pending confirmation and resolves `false`; no-UI modes resolve `false` without presenting a dialog. The restricted pre-session `ProjectTrustContext` does not attest timeout handling. |
+| `session.shutdown.v1` | On full `ExtensionContext` values, `ctx.shutdown()` requests graceful host shutdown. TUI, RPC, print, and JSON honor the request at a safe idle/turn boundary, prevent subsequent queued prompts from starting, and dispose the runtime. |
+
+Capability tokens attest only these behaviors in the stated context and mode scope. They do not grant mutation, execution, continuation, launch, publication, or promotion authority.
 
 ### ctx.mode
 
@@ -1014,7 +1044,7 @@ Request a graceful shutdown of pi.
 
 - **Interactive mode:** Deferred until the agent becomes idle (after processing all queued steering and follow-up messages).
 - **RPC mode:** Deferred until the next idle state (after completing the current command response, when waiting for the next command).
-- **Print mode:** No-op. The process exits automatically when all prompts are processed.
+- **Print/JSON mode:** Honored before the first prompt or after the active prompt reaches its safe boundary; subsequent queued prompts are skipped.
 
 Emits `session_shutdown` event to all extensions before exiting. Available in all contexts (event handlers, tools, commands, shortcuts).
 

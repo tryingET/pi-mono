@@ -6,7 +6,8 @@ import type { TUI } from "@earendil-works/pi-tui";
 
 export class CountdownTimer {
 	private intervalId: ReturnType<typeof setInterval> | undefined;
-	private remainingSeconds: number;
+	private timeoutId: ReturnType<typeof setTimeout> | undefined;
+	private readonly deadline: number;
 	private tui: TUI | undefined;
 	private onTick: (seconds: number) => void;
 	private onExpire: () => void;
@@ -15,25 +16,30 @@ export class CountdownTimer {
 		this.tui = tui;
 		this.onTick = onTick;
 		this.onExpire = onExpire;
-		this.remainingSeconds = Math.ceil(timeoutMs / 1000);
-		this.onTick(this.remainingSeconds);
+		this.deadline = Date.now() + timeoutMs;
+		this.onTick(Math.ceil(timeoutMs / 1000));
 
 		this.intervalId = setInterval(() => {
-			this.remainingSeconds--;
-			this.onTick(this.remainingSeconds);
+			const remainingMs = Math.max(0, this.deadline - Date.now());
+			this.onTick(Math.ceil(remainingMs / 1000));
 			this.tui?.requestRender();
-
-			if (this.remainingSeconds <= 0) {
-				this.dispose();
-				this.onExpire();
-			}
 		}, 1000);
+		this.timeoutId = setTimeout(() => {
+			this.onTick(0);
+			this.tui?.requestRender();
+			this.dispose();
+			this.onExpire();
+		}, timeoutMs);
 	}
 
 	dispose(): void {
 		if (this.intervalId) {
 			clearInterval(this.intervalId);
 			this.intervalId = undefined;
+		}
+		if (this.timeoutId) {
+			clearTimeout(this.timeoutId);
+			this.timeoutId = undefined;
 		}
 	}
 }

@@ -79,6 +79,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
+import type { ExtensionHostCapabilities } from "./host-capabilities.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -302,6 +303,8 @@ export interface CompactOptions {
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
+	/** Immutable host-owned extension API identity and capability tokens. */
+	readonly hostCapabilities: ExtensionHostCapabilities;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
@@ -517,6 +520,8 @@ export interface ProjectTrustEventResult {
 }
 
 export interface ProjectTrustContext {
+	/** Immutable host-owned extension API identity and capability tokens. */
+	readonly hostCapabilities: ExtensionHostCapabilities;
 	cwd: string;
 	mode: ExtensionMode;
 	hasUI: boolean;

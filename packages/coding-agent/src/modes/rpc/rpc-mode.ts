@@ -83,8 +83,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	// Shutdown request flag
 	let shutdownRequested = false;
-	let shuttingDown = false;
+	let shutdownPromise: Promise<never> | undefined;
 	const signalCleanupHandlers: Array<() => void> = [];
+	let detachInput = () => {};
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -380,6 +381,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	await rebindSession();
 	registerSignalHandlers();
+	await checkShutdownRequested();
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
@@ -697,21 +699,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	 * Check if shutdown was requested and perform shutdown if so.
 	 * Called after handling each command when waiting for the next command.
 	 */
-	let detachInput = () => {};
+	function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
+		shutdownPromise ??= performShutdown(exitCode, signal);
+		return shutdownPromise;
+	}
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
-		if (shuttingDown) {
-			process.exit(exitCode);
-		}
-		shuttingDown = true;
+	async function performShutdown(exitCode: number, signal?: NodeJS.Signals): Promise<never> {
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
-		await runtimeHost.dispose();
 		detachInput();
 		process.stdin.pause();
+		await runtimeHost.dispose();
 		if (signal !== "SIGTERM") {
 			await flushRawStdout();
 		}
@@ -724,6 +725,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	}
 
 	const handleInputLine = async (line: string) => {
+		if (shutdownRequested) {
+			await checkShutdownRequested();
+			return;
+		}
+
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(line);

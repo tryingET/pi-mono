@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import { attachExtensionHostCapabilities } from "../core/extensions/host-capabilities.ts";
 import type { ProjectTrustContext } from "../core/extensions/types.ts";
 import type { AppMode } from "../core/project-trust.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
@@ -10,7 +11,7 @@ export function createProjectTrustContext(options: {
 	settingsManager: SettingsManager;
 	hasUI: boolean;
 }): ProjectTrustContext {
-	return {
+	return attachExtensionHostCapabilities<Omit<ProjectTrustContext, "hostCapabilities">>({
 		cwd: options.cwd,
 		mode: options.mode === "interactive" ? "tui" : options.mode,
 		hasUI: options.hasUI,
@@ -58,5 +59,5 @@ export function createProjectTrustContext(options: {
 				}
 			},
 		},
-	};
+	});
 }

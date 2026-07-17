@@ -12,12 +12,14 @@ import {
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import type {
-	ExtensionFactory,
-	SessionBeforeForkEvent,
-	SessionBeforeSwitchEvent,
-	SessionShutdownEvent,
-	SessionStartEvent,
+import {
+	EXTENSION_HOST_CAPABILITIES,
+	type ExtensionFactory,
+	type ExtensionHostCapabilities,
+	type SessionBeforeForkEvent,
+	type SessionBeforeSwitchEvent,
+	type SessionShutdownEvent,
+	type SessionStartEvent,
 } from "../src/index.ts";
 
 type RecordedSessionEvent =
@@ -99,7 +101,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			agentDir: tempDir,
 			sessionManager: SessionManager.create(tempDir),
 		});
-		await runtimeHost.session.bindExtensions({});
+		await runtimeHost.session.bindExtensions({ shutdownHandler: () => {} });
 
 		cleanups.push(async () => {
 			await runtimeHost.dispose();
@@ -114,6 +116,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 	it("emits session_before_switch and session_start for new and resume flows", async () => {
 		const events: RecordedSessionEvent[] = [];
+		const startHosts: Array<{ reason: SessionStartEvent["reason"]; host: ExtensionHostCapabilities }> = [];
 		const { runtimeHost } = await createRuntimeHost((pi) => {
 			pi.on("session_before_switch", (event) => {
 				events.push(event);
@@ -121,12 +124,21 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			pi.on("session_shutdown", (event) => {
 				events.push(event);
 			});
-			pi.on("session_start", (event) => {
+			pi.on("session_start", (event, ctx) => {
 				events.push(event);
+				startHosts.push({ reason: event.reason, host: ctx.hostCapabilities });
 			});
 		});
 
 		expect(events).toEqual([{ type: "session_start", reason: "startup" }]);
+		expect(startHosts).toEqual([{ reason: "startup", host: EXTENSION_HOST_CAPABILITIES }]);
+		events.length = 0;
+
+		await runtimeHost.session.reload();
+		expect(events).toEqual([
+			{ type: "session_shutdown", reason: "reload" },
+			{ type: "session_start", reason: "reload" },
+		]);
 		events.length = 0;
 
 		await runtimeHost.session.prompt("hello");
@@ -153,6 +165,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			{ type: "session_before_switch", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
+		]);
+		expect(startHosts).toEqual([
+			{ reason: "startup", host: EXTENSION_HOST_CAPABILITIES },
+			{ reason: "reload", host: EXTENSION_HOST_CAPABILITIES },
+			{ reason: "new", host: EXTENSION_HOST_CAPABILITIES },
+			{ reason: "resume", host: EXTENSION_HOST_CAPABILITIES },
 		]);
 	});
 
@@ -208,6 +226,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 	it("emits session_before_fork and session_start and honors cancellation", async () => {
 		const events: RecordedSessionEvent[] = [];
+		const startHosts: Array<{ reason: SessionStartEvent["reason"]; host: ExtensionHostCapabilities }> = [];
 		let cancelNextFork = false;
 		const { runtimeHost } = await createRuntimeHost((pi) => {
 			pi.on("session_before_fork", (event) => {
@@ -220,8 +239,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			pi.on("session_shutdown", (event) => {
 				events.push(event);
 			});
-			pi.on("session_start", (event) => {
+			pi.on("session_start", (event, ctx) => {
 				events.push(event);
+				startHosts.push({ reason: event.reason, host: ctx.hostCapabilities });
 			});
 		});
 
@@ -240,6 +260,10 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
 			{ type: "session_shutdown", reason: "fork", targetSessionFile: runtimeHost.session.sessionFile },
 			{ type: "session_start", reason: "fork", previousSessionFile },
+		]);
+		expect(startHosts).toEqual([
+			{ reason: "startup", host: EXTENSION_HOST_CAPABILITIES },
+			{ reason: "fork", host: EXTENSION_HOST_CAPABILITIES },
 		]);
 
 		events.length = 0;
