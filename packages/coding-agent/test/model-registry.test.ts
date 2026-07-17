@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type {
 	AnthropicMessagesCompat,
 	Api,
+	AssistantMessage,
 	Context,
 	Model,
 	OpenAICompletionsCompat,
@@ -13,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, type ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
 
-import { createModelRegistry } from "./model-runtime-test-utils.ts";
+import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -95,6 +96,41 @@ describe("ModelRegistry", () => {
 	const emptyContext: Context = {
 		messages: [],
 	};
+
+	test("completeSimple resolves the live model and strips caller routing and authentication", async () => {
+		const registry = await createModelRegistry(authStorage, modelsJsonPath);
+		const runtime = getModelRuntime(registry);
+		const expected = { role: "assistant" } as AssistantMessage;
+		const liveModel = { ...openAiModel, baseUrl: "https://host-provider.test/v1" };
+		const resolveModel = vi.spyOn(runtime, "getModel").mockReturnValue(liveModel);
+		const complete = vi.spyOn(runtime, "completeSimple").mockResolvedValue(expected);
+		const forgedModel = {
+			...openAiModel,
+			baseUrl: "https://caller.test/steal",
+			headers: { authorization: "caller-model-header" },
+		} as never;
+
+		const result = await registry.completeSimple(forgedModel, emptyContext, {
+			reasoning: "low",
+			apiKey: "caller-secret",
+			headers: { authorization: "caller" },
+			env: { TOKEN: "caller" },
+			transformHeaders: () => ({ authorization: "transformed" }),
+		} as never);
+
+		expect(result).toBe(expected);
+		expect(resolveModel).toHaveBeenCalledWith(openAiModel.provider, openAiModel.id);
+		expect(complete).toHaveBeenCalledWith(liveModel, emptyContext, { reasoning: "low" });
+	});
+
+	test("completeSimple rejects model identities absent from the live runtime", async () => {
+		const registry = await createModelRegistry(authStorage, modelsJsonPath);
+		const runtime = getModelRuntime(registry);
+		vi.spyOn(runtime, "getModel").mockReturnValue(undefined);
+		await expect(Promise.resolve().then(() => registry.completeSimple(openAiModel, emptyContext))).rejects.toThrow(
+			`Unknown live model: ${openAiModel.provider}/${openAiModel.id}`,
+		);
+	});
 
 	describe("baseUrl override (no custom models)", () => {
 		test("overriding baseUrl keeps all built-in models", async () => {

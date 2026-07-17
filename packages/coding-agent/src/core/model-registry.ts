@@ -1,8 +1,20 @@
-import type { Api, AuthResult, Model, Provider } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	AuthResult,
+	Context,
+	Model,
+	ModelsSimpleStreamOptions,
+	Provider,
+} from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
 import type { AuthStatus, ProviderConfigInput } from "./provider-composer.ts";
 
 export type { ProviderConfigInput } from "./provider-composer.ts";
+export type ExtensionModelCompletionOptions = Omit<
+	ModelsSimpleStreamOptions,
+	"apiKey" | "headers" | "env" | "transformHeaders"
+>;
 export type ResolvedRequestAuth =
 	| {
 			ok: true;
@@ -86,6 +98,27 @@ export class ModelRegistry {
 						: message,
 			};
 		}
+	}
+
+	/**
+	 * Complete one model request through Pi's live provider and authentication runtime.
+	 * Extension callers cannot supply request authentication or transform host-owned headers.
+	 */
+	completeSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ExtensionModelCompletionOptions,
+	): Promise<AssistantMessage> {
+		const liveModel = this.runtime.getModel(model.provider, model.id);
+		if (!liveModel) {
+			throw new Error(`Unknown live model: ${model.provider}/${model.id}`);
+		}
+		const hostOptions: ModelsSimpleStreamOptions = { ...options };
+		delete hostOptions.apiKey;
+		delete hostOptions.headers;
+		delete hostOptions.env;
+		delete hostOptions.transformHeaders;
+		return this.runtime.completeSimple(liveModel, context, hostOptions);
 	}
 
 	getProviderAuthStatus(provider: string): AuthStatus {

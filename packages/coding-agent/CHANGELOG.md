@@ -5,6 +5,7 @@
 ### Added
 
 - Added extension registration for complete pi-ai providers, including native authentication, model refresh, filtering, and streaming behavior.
+- Added `ctx.modelRegistry.completeSimple()` for host-authenticated extension model calls through the live provider runtime.
 
 ### Fixed
 

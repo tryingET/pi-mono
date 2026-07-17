@@ -1007,7 +1007,22 @@ ctx.sessionManager.getLeafId()              // Current leaf entry ID
 
 ### ctx.modelRegistry / ctx.model
 
-Access to models, providers, and resolved authentication. `ctx.modelRegistry.getProvider(id)` returns the effective pi-ai provider, while `getProviderAuth(id)` resolves its current API key, headers, base URL, and provider-scoped environment without requiring a loaded model. `ctx.model` is the active model.
+Access to the active model and Pi's live model registry. `ctx.modelRegistry.getProvider(id)` returns the effective pi-ai provider, while `getProviderAuth(id)` resolves its current API key, headers, base URL, and provider-scoped environment without requiring a loaded model. `ctx.model` is the active model.
+
+Use `modelRegistry.completeSimple()` when an extension needs a host-owned model call. Pi resolves authentication and dispatches through the live provider registry, including extension-registered provider overrides.
+
+```typescript
+const response = await ctx.modelRegistry.completeSimple(
+  ctx.model!,
+  {
+    systemPrompt: "Summarize the supplied text.",
+    messages: [{ role: "user", content: "...", timestamp: Date.now() }],
+  },
+  { reasoning: "low", signal: ctx.signal },
+);
+```
+
+Request routing and authentication remain host-owned. Pi resolves the supplied provider/model id back to the canonical live model before dispatch; caller-supplied model URLs or headers are not trusted. Caller-supplied `apiKey`, request `headers`, provider `env`, and header transforms are excluded from the public options type and stripped at the runtime boundary.
 
 ### ctx.signal
 
