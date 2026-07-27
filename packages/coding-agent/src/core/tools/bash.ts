@@ -16,7 +16,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ExtensionContext, ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { OutputAccumulator } from "./output-accumulator.ts";
+import { DEFAULT_MAX_ARCHIVE_BYTES, OutputAccumulator, type OutputArchiveSnapshot } from "./output-accumulator.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
@@ -47,6 +47,7 @@ export type BashToolInput = Static<typeof bashSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	archive?: OutputArchiveSnapshot;
 }
 
 /**
@@ -231,6 +232,21 @@ function formatBashCall(args: { command?: string; timeout?: number } | undefined
 	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
 }
 
+function formatArchiveNotice(archive: OutputArchiveSnapshot | undefined, fullOutputPath?: string): string | undefined {
+	if (fullOutputPath) return `Full output: ${fullOutputPath}`;
+	if (!archive) return undefined;
+	if (archive.status === "failed") {
+		return `Output archive failed: ${archive.error ?? "unknown archive failure"}${archive.path ? ` (archive path: ${archive.path})` : ""}`;
+	}
+	if (archive.truncated) {
+		return `Output archive capped at ${formatSize(archive.maxBytes)}${archive.path ? `: ${archive.path}` : ""}`;
+	}
+	if (archive.status === "pending") {
+		return `Output archive pending${archive.path ? `: ${archive.path}` : ""}`;
+	}
+	return undefined;
+}
+
 function rebuildBashResultRenderComponent(
 	component: BashResultRenderComponent,
 	result: {
@@ -248,9 +264,11 @@ function rebuildBashResultRenderComponent(
 	let output = getTextOutput(result as any, showImages).trim();
 	const truncation = result.details?.truncation;
 	const fullOutputPath = result.details?.fullOutputPath;
-	if (!options.isPartial && truncation?.truncated && fullOutputPath && output.endsWith("]")) {
+	const archive = result.details?.archive;
+	const archiveNotice = formatArchiveNotice(archive, fullOutputPath);
+	if (!options.isPartial && truncation?.truncated && archiveNotice && output.endsWith("]")) {
 		const footerStart = output.lastIndexOf("\n\n[");
-		if (footerStart !== -1 && output.slice(footerStart).includes(fullOutputPath)) {
+		if (footerStart !== -1 && output.slice(footerStart).includes(archiveNotice)) {
 			output = output.slice(0, footerStart).trimEnd();
 		}
 	}
@@ -289,11 +307,9 @@ function rebuildBashResultRenderComponent(
 		}
 	}
 
-	if (truncation?.truncated || fullOutputPath) {
+	if (truncation?.truncated || archive) {
 		const warnings: string[] = [];
-		if (fullOutputPath) {
-			warnings.push(`Full output: ${fullOutputPath}`);
-		}
+		if (archiveNotice) warnings.push(archiveNotice);
 		if (truncation?.truncated) {
 			if (truncation.truncatedBy === "lines") {
 				warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
@@ -324,7 +340,7 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first). If truncated, up to ${formatSize(DEFAULT_MAX_ARCHIVE_BYTES)} is archived to a temp file. Optionally provide a timeout in seconds.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
 		promptGuidelines: exposeSessionEnvironment
 			? ["Inspect PI_* environment variables for current model and session details."]
@@ -355,6 +371,7 @@ export function createBashToolDefinition(
 					details: {
 						truncation: snapshot.truncation.truncated ? snapshot.truncation : undefined,
 						fullOutputPath: snapshot.fullOutputPath,
+						archive: snapshot.archive,
 					},
 				});
 			};
@@ -396,9 +413,9 @@ export function createBashToolDefinition(
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				const snapshot = output.snapshot({ persistIfTruncated: true });
+				output.snapshot({ persistIfTruncated: true });
 				await output.closeTempFile();
-				return snapshot;
+				return output.snapshot();
 			};
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
@@ -406,17 +423,20 @@ export function createBashToolDefinition(
 				let text = snapshot.content || emptyText;
 				let details: BashToolDetails | undefined;
 				if (truncation.truncated) {
-					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
+					details = { truncation, fullOutputPath: snapshot.fullOutputPath, archive: snapshot.archive };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
 					if (truncation.lastLinePartial) {
 						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}).`;
 					} else if (truncation.truncatedBy === "lines") {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}.`;
 					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(truncation.maxBytes)} limit).`;
 					}
+					const archiveNotice = formatArchiveNotice(snapshot.archive, snapshot.fullOutputPath);
+					if (archiveNotice) text += ` ${archiveNotice}`;
+					text += "]";
 				}
 				return { text, details };
 			};

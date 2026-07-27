@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed bash output archive quota and disk-full failures crashing the process; archives are now bounded independently from the displayed output tail.
+
 ## [0.82.1] - 2026-07-25
 
 ### New Features

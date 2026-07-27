@@ -191,6 +191,72 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).not.toContain("[Showing lines 2001-4000 of 4000. Full output:");
 	});
 
+	test("bash renderer does not duplicate capped or failed archive notices", () => {
+		const tool = createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false });
+		const truncation = {
+			content: "line-2",
+			truncated: true,
+			truncatedBy: "lines" as const,
+			totalLines: 2,
+			totalBytes: 13,
+			outputLines: 1,
+			outputBytes: 6,
+			lastLinePartial: false,
+			firstLineExceedsLimit: false,
+			maxLines: 1,
+			maxBytes: 50 * 1024,
+		};
+		const scenarios = [
+			{
+				id: "capped",
+				notice: "Output archive capped at 5B: /bounded.log",
+				archive: {
+					path: "/bounded.log",
+					archivedBytes: 5,
+					maxBytes: 5,
+					status: "succeeded" as const,
+					truncated: true,
+				},
+			},
+			{
+				id: "failed",
+				notice: "Output archive failed: EDQUOT: storage unavailable",
+				archive: {
+					archivedBytes: 0,
+					maxBytes: 10 * 1024 * 1024,
+					status: "failed" as const,
+					truncated: false,
+					error: "EDQUOT: storage unavailable",
+				},
+			},
+		];
+
+		for (const scenario of scenarios) {
+			const component = new ToolExecutionComponent(
+				"bash",
+				`tool-bash-${scenario.id}`,
+				{ command: "generate output" },
+				{},
+				tool,
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.setExpanded(true);
+			component.updateResult(
+				{
+					content: [{ type: "text", text: `line-2\n\n[Showing lines 2-2 of 2. ${scenario.notice}]` }],
+					details: { truncation, archive: scenario.archive },
+					isError: false,
+				},
+				false,
+			);
+
+			const rendered = stripAnsi(component.render(200).join("\n"));
+			expect(rendered.split(scenario.notice).length - 1).toBe(1);
+			expect(rendered).not.toContain("[Showing lines 2-2 of 2.");
+		}
+	});
+
 	test("does not duplicate built-in headers when passed the active built-in definition", () => {
 		const component = new ToolExecutionComponent(
 			"read",
