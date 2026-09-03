@@ -1,0 +1,185 @@
+{
+  "$id": "https://ai-society.local/schemas/pi-strict-runtime-attestation-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "agent_id": {
+      "pattern": "^urn:uuid:"
+    },
+    "approval": {
+      "const": false
+    },
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "credentials": {
+          "maxItems": 0,
+          "type": "array"
+        },
+        "extensions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "modes": {
+          "maxItems": 0,
+          "type": "array"
+        },
+        "tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "tools",
+        "extensions",
+        "credentials",
+        "modes"
+      ],
+      "type": "object"
+    },
+    "claim": {
+      "const": "runtime-observation"
+    },
+    "hooks": {
+      "additionalProperties": false,
+      "properties": {
+        "inventory_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "pre_effect_complete": {
+          "const": false
+        },
+        "pre_provider_complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "inventory_digest",
+        "pre_provider_complete",
+        "pre_effect_complete"
+      ],
+      "type": "object"
+    },
+    "observation": {
+      "enum": [
+        "observed",
+        "mismatch",
+        "unproven"
+      ]
+    },
+    "permit_id": {
+      "type": "string"
+    },
+    "provider_input": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "message_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "model_identity": {
+          "type": "string"
+        },
+        "system_prompt_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "tool_schema_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "identity",
+        "system_prompt_digest",
+        "message_digest",
+        "tool_schema_digest",
+        "model_identity"
+      ],
+      "type": "object"
+    },
+    "release_id": {
+      "type": "string"
+    },
+    "resources": {
+      "additionalProperties": false,
+      "properties": {
+        "ambient_count": {
+          "const": 0
+        },
+        "exact_materialization": {
+          "const": true
+        },
+        "view_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "view_digest",
+        "ambient_count",
+        "exact_materialization"
+      ],
+      "type": "object"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "schema": {
+      "const": "pi.strict-runtime-attestation/1"
+    },
+    "session": {
+      "additionalProperties": false,
+      "properties": {
+        "compaction_loaded": {
+          "const": false
+        },
+        "fresh": {
+          "const": true
+        },
+        "memory_loaded": {
+          "const": false
+        },
+        "mode": {
+          "const": "strict-pilot"
+        },
+        "resumed": {
+          "const": false
+        },
+        "transcript_loaded": {
+          "const": false
+        }
+      },
+      "required": [
+        "mode",
+        "fresh",
+        "resumed",
+        "memory_loaded",
+        "transcript_loaded",
+        "compaction_loaded"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema",
+    "run_id",
+    "agent_id",
+    "release_id",
+    "permit_id",
+    "session",
+    "resources",
+    "capabilities",
+    "provider_input",
+    "hooks",
+    "observation",
+    "claim",
+    "approval"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,46 @@
+{
+  "agent_id": "urn:uuid:00000000-0000-4000-8000-000000000001",
+  "approval": false,
+  "capabilities": {
+    "credentials": [],
+    "extensions": [
+      "pi-autonomous-session-control"
+    ],
+    "modes": [],
+    "tools": [
+      "read"
+    ]
+  },
+  "claim": "runtime-observation",
+  "expected_error": "ambient_resource_present",
+  "hooks": {
+    "inventory_digest": "sha256:da55710dcc6d3e834e56ace105f5f192ff4f53071c2a0541d36c626e48dab6e6",
+    "pre_effect_complete": false,
+    "pre_provider_complete": true
+  },
+  "observation": "observed",
+  "permit_id": "fixture:permit:adoption-steward-a0a1",
+  "provider_input": {
+    "identity": "sha256:89f66b8271baf0850258ba806e50677b305122021090790604ea00b3dcb61386",
+    "message_digest": "sha256:42310e835c9b16705ff1da1ff3cedf9127de7e263619924d44bf1e681c902392",
+    "model_identity": "provider:model:exact-reviewed-version",
+    "system_prompt_digest": "sha256:c56e492b81e8f9a70635cc07e97b94e1bb0db7c0504e2f0aa78d29dfb2b4f7f9",
+    "tool_schema_digest": "sha256:cc2e1897d5b8ddb3b4467964897b0db99b8b9db6e6c44bfc93353dc0ce2fe227"
+  },
+  "release_id": "fixture:release:adoption-steward-a0a1",
+  "resources": {
+    "ambient_count": 1,
+    "exact_materialization": true,
+    "view_digest": "sha256:593c99dfb03958b34c995f74994305451592b85935d91a0bac78857bdf8490b7"
+  },
+  "run_id": "fixture:run:adoption-steward-a0a1",
+  "schema": "pi.strict-runtime-attestation/1",
+  "session": {
+    "compaction_loaded": false,
+    "fresh": true,
+    "memory_loaded": false,
+    "mode": "strict-pilot",
+    "resumed": false,
+    "transcript_loaded": false
+  }
+}
