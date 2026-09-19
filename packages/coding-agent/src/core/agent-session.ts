@@ -323,6 +323,8 @@ export class AgentSession {
 	private _eventListeners: AgentSessionEventListener[] = [];
 	private _isAgentRunActive = false;
 	private _agentRunAbortRequested = false;
+	/** Retained by pending input hooks even after their originating run settles. */
+	private _inputRun: { aborted: boolean } | undefined;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 
@@ -1184,6 +1186,7 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		this._inputRun = { aborted: false };
 		this._agentRunAbortRequested = false;
 		this._isAgentRunActive = true;
 		try {
@@ -1270,6 +1273,7 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		const inputRun = this.isStreaming ? this._inputRun : undefined;
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1312,8 +1316,8 @@ export class AgentSession {
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
-			// If streaming, queue via steer() or followUp() based on option
-			if (this.isStreaming) {
+			// Input submitted to a stopped run stays queued even if its hook outlives that run.
+			if (this.isStreaming || inputRun?.aborted) {
 				if (!options?.streamingBehavior) {
 					throw new Error(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
@@ -1735,6 +1739,7 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		if (this._isAgentRunActive) {
 			this._agentRunAbortRequested = true;
+			if (this._inputRun) this._inputRun.aborted = true;
 		}
 		this.abortRetry();
 		this.abortCompaction();

@@ -106,18 +106,21 @@ export async function runAgentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
-	const initialMessages = declareToolChanges(context, prompts);
-	const newMessages: AgentMessage[] = [...initialMessages];
+	const newMessages: AgentMessage[] = [];
 	const currentContext: AgentContext = {
 		...context,
-		messages: [...context.messages, ...initialMessages],
+		messages: [...context.messages],
 	};
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
-	for (const message of initialMessages) {
+	// Explicit prompts are already submitted input; only queue-backed originals can be rejected.
+	for (const { message, original } of declareToolChanges(currentContext, prompts)) {
+		if (!acceptQueuedMessage(emit, original)) continue;
 		await emit({ type: "message_start", message });
 		await emit({ type: "message_end", message });
+		currentContext.messages.push(message);
+		newMessages.push(message);
 	}
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
@@ -170,18 +173,24 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
+	if (signal?.aborted) {
+		await emit({ type: "agent_end", messages: newMessages });
+		return;
+	}
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
-	while (true) {
+	run: while (true) {
 		let hasMoreToolCalls = true;
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			let preparedMessages: AgentMessage[] = [];
+			if (signal?.aborted) break run;
 			if (lastCompletedTurn) {
 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+				if (signal?.aborted) break run;
 				if (nextTurnSnapshot) {
 					currentContext = nextTurnSnapshot.context ?? currentContext;
 					preparedMessages = nextTurnSnapshot.messages ?? [];
@@ -206,7 +215,16 @@ async function runLoop(
 			}
 
 			// Process prepared and queued messages before the next assistant response.
-			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+			let rejectedSystemMessage = false;
+			for (const { message, original } of declareToolChanges(currentContext, [
+				...preparedMessages,
+				...pendingMessages,
+			])) {
+				if (signal?.aborted) break run;
+				if (!acceptQueuedMessage(emit, original)) {
+					rejectedSystemMessage ||= message.role === "system";
+					continue;
+				}
 				await emit({ type: "message_start", message });
 				await emit({ type: "message_end", message });
 				currentContext.messages.push(message);
@@ -214,7 +232,20 @@ async function runLoop(
 			}
 			pendingMessages = [];
 
+			// A cleared system message may have carried the normalized tool delta. Reconcile
+			// against what was actually accepted, without reviving its cleared content.
+			if (rejectedSystemMessage) {
+				for (const { message } of declareToolChanges(currentContext, [])) {
+					if (signal?.aborted) break run;
+					await emit({ type: "message_start", message });
+					await emit({ type: "message_end", message });
+					currentContext.messages.push(message);
+					newMessages.push(message);
+				}
+			}
+
 			// Stream assistant response
+			if (signal?.aborted) break run;
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
 			newMessages.push(message);
 
@@ -260,9 +291,11 @@ async function runLoop(
 				return;
 			}
 
+			if (signal?.aborted) break run;
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
 		}
 
+		if (signal?.aborted) break;
 		// Agent would stop here. Check for follow-up messages.
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
@@ -288,7 +321,11 @@ async function runLoop(
  * the executable set, so replay always yields exactly `context.tools`. Otherwise a new
  * system message is inserted before the first non-system pending message.
  */
-function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage[]): AgentMessage[] {
+function declareToolChanges(
+	context: AgentContext,
+	pendingMessages: AgentMessage[],
+): { message: AgentMessage; original?: AgentMessage }[] {
+	const originals = pendingMessages.map((message) => ({ message, original: message }));
 	let systemIndex = -1;
 	for (let i = pendingMessages.length - 1; i >= 0; i--) {
 		if (pendingMessages[i].role === "system") {
@@ -310,14 +347,22 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 
 	if (pending) {
 		// Keep the caller's message object when it already declares no tool changes.
-		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return pendingMessages;
-		return baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message));
+		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return originals;
+		return originals.map((entry, index) =>
+			index === systemIndex ? { message: withToolChanges(pending, changes), original: pending } : entry,
+		);
 	}
-	if (unchanged) return pendingMessages;
+	if (unchanged) return originals;
 	const update = withToolChanges({ role: "system", content: "", timestamp: Date.now() }, changes);
 	const insertIndex = pendingMessages.findIndex((message) => message.role !== "system");
 	const index = insertIndex === -1 ? pendingMessages.length : insertIndex;
-	return [...pendingMessages.slice(0, index), update, ...pendingMessages.slice(index)];
+	return [...originals.slice(0, index), { message: update }, ...originals.slice(index)];
+}
+
+// Only Agent supplies this private sink adjunct. Low-level callers accept messages normally.
+function acceptQueuedMessage(emit: AgentEventSink, original: AgentMessage | undefined): boolean {
+	const sink = emit as AgentEventSink & { acceptQueuedMessage?: (message: AgentMessage) => boolean };
+	return !original || sink.acceptQueuedMessage?.(original) !== false;
 }
 
 const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
