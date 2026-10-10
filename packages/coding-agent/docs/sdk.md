@@ -107,6 +107,8 @@ Each boundary can be supplied explicitly:
 
 Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely.
 
+For an explicitly pinned builtin Codex worker, pass `requestIdentity: { provider, model, route }` alongside the exact catalog `model`. The returned `requestCustody.path` supports credential-free checked readback through `readRequestCustody()`. Strict mode refuses unsupported selection/dispatch and does not enroll independent extension-owned runtimes. See [Exact request identity and custody](model-request-contract.md) for transport, journal, unsupported-path and adoption limits.
+
 <a id="inlineextension"></a>
 
 Inline extension factories can be supplied through `DefaultResourceLoader`. Give one an `InlineExtension` name only when it needs a stable name in diagnostics and startup output. A named inline extension with `replaceable: true` is left out when another extension registers a tool, command, or flag with a name it registers during loading, instead of both loading with a conflict. The CLI's built-in codemode, tool search, and MCP extensions are replaceable. A named entry with `builtin: true` is not an inline extension: it supplies the code of the `builtin:<name>` extension, which loads like a configured extension file. It loads by default, is listed in `pi config`, and is disabled by `-builtin:<name>` in the `extensions` setting or by `noExtensions`; `additionalExtensionPaths: ["builtin:<name>"]` loads it explicitly. It loads after project trust is resolved, so it cannot handle `project_trust`. The CLI's built-in extensions use it.

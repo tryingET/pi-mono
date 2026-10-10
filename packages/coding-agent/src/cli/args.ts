@@ -3,6 +3,7 @@
  */
 
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { captureRequestIdentity, type RequestIdentity, RequestIdentityError } from "@earendil-works/pi-ai";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
@@ -11,6 +12,7 @@ import { getToolListError, type TuiMode } from "../core/settings-manager.ts";
 export type Mode = "text" | "json" | "rpc";
 
 export interface Args {
+	requestIdentity?: RequestIdentity;
 	provider?: string;
 	model?: string;
 	apiKey?: string;
@@ -70,6 +72,7 @@ export function normalizeSessionName(value: string): string | undefined {
 }
 
 export function parseArgs(args: string[]): Args {
+	let sawRequestIdentity = false;
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
@@ -112,6 +115,19 @@ export function parseArgs(args: string[]): Args {
 			result.continue = true;
 		} else if (arg === "--resume" || arg === "-r") {
 			result.resume = true;
+		} else if (arg === "--request-identity" || arg.startsWith("--request-identity=")) {
+			const raw = arg.startsWith("--request-identity=") ? arg.slice("--request-identity=".length) : args[i + 1];
+			if (arg === "--request-identity" && raw !== undefined && !raw.startsWith("--")) i++;
+			try {
+				if (sawRequestIdentity || raw === undefined) throw new RequestIdentityError("duplicate or missing CLI pin");
+				result.requestIdentity = parseRequestIdentity(raw);
+			} catch {
+				result.diagnostics.push({
+					type: "error",
+					message: "Invalid --request-identity: expected one bounded {provider,model,route} Codex JSON object",
+				});
+			}
+			sawRequestIdentity = true;
 		} else if (arg === "--provider" && i + 1 < args.length) {
 			result.provider = args[++i];
 		} else if (arg === "--model" && i + 1 < args.length) {
@@ -270,6 +286,23 @@ export function parseArgs(args: string[]): Args {
 	return result;
 }
 
+export function parseRequestIdentity(raw: string): Readonly<RequestIdentity> {
+	if (Buffer.byteLength(raw, "utf8") > 1024) throw new RequestIdentityError("CLI pin too large");
+	const value: unknown = JSON.parse(raw);
+	if (
+		!value ||
+		typeof value !== "object" ||
+		Array.isArray(value) ||
+		Object.keys(value).length !== 3 ||
+		Object.keys(value).some((key) => !["provider", "model", "route"].includes(key))
+	)
+		throw new RequestIdentityError("invalid CLI pin fields");
+	// JSON.parse silently accepts duplicate keys, including escaped spellings.
+	const keys = [...raw.matchAll(/("(?:\\.|[^"\\])*")\s*:/g)].map((match) => JSON.parse(match[1]) as string);
+	if (keys.length !== 3 || new Set(keys).size !== 3) throw new RequestIdentityError("duplicate CLI pin field");
+	return captureRequestIdentity(value as RequestIdentity);
+}
+
 export function printHelp(extensionFlags?: ExtensionFlag[]): void {
 	const extensionFlagsText =
 		extensionFlags && extensionFlags.length > 0
@@ -300,6 +333,7 @@ ${chalk.bold("Commands:")}
 ${chalk.bold("Options:")}
   --provider <name>              Provider to search for --model (requires --model)
   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
+  --request-identity <json>      Exact {provider,model,route} Codex pin; no fuzzy selection or fallback
   --api-key <key>                API key (defaults to env vars)
   --system-prompt <text>         System prompt (default: coding assistant prompt)
   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)

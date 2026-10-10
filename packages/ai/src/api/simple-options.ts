@@ -47,6 +47,8 @@ export function buildBaseOptions(
 		signal: options?.signal,
 		telemetryContext: options?.telemetryContext,
 		apiKey: apiKey || options?.apiKey,
+		requestIdentity: options?.requestIdentity,
+		onRequestAttempt: options?.onRequestAttempt,
 		fetch: options?.fetch,
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,

@@ -1,6 +1,16 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import {
+	Agent,
+	type AgentMessage,
+	type StreamFn,
+	setDefaultStreamFn,
+	type ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
+import {
+	createAssistantMessageEventStream,
+	type ModelsSimpleStreamOptions,
+	type RequestIdentity,
+} from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -14,6 +24,7 @@ import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
+import { RequestCustody } from "./request-custody.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -46,6 +57,8 @@ import { getBranchSelection } from "./virtual-models.ts";
 setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
+	/** Opt-in exact Codex identity and host-owned durable request-attempt custody. */
+	requestIdentity?: RequestIdentity;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -107,6 +120,8 @@ export interface CreateAgentSessionOptions {
 
 /** Result from createAgentSession */
 export interface CreateAgentSessionResult {
+	/** Credential-free checked readback is independent of mutable message events. */
+	requestCustody?: RequestCustody;
 	/** The created session */
 	session: AgentSession;
 	/** Extensions result (for UI context setup in interactive mode) */
@@ -189,13 +204,17 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	const requestIdentity = RequestCustody.snapshot(options.requestIdentity, options.model);
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
 	const authPath = options.agentDir ? join(agentDir, "auth.json") : undefined;
 	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
-	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
+	const modelRuntime = options.modelRuntime
+		? RequestCustody.baseRuntime(options.modelRuntime)
+		: await ModelRuntime.create({ authPath, modelsPath });
+	if (requestIdentity && options.model) modelRuntime.assertStrictRequestIdentity(options.model, requestIdentity);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
@@ -330,6 +349,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
+	const requestCustody = requestIdentity
+		? RequestCustody.create(join(agentDir, "request-custody"), sessionManager.getSessionId(), requestIdentity)
+		: undefined;
+	const foregroundOptions = new WeakSet<object>();
+	const dispatchRuntime = requestCustody ? requestCustody.bindRuntime(modelRuntime, foregroundOptions) : modelRuntime;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 	const cacheWarmer = new CacheWarmer(
 		modelRuntime,
@@ -408,6 +432,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
+	const streamRequest: StreamFn = async (model, context, options) => {
+		const requestOptions = buildRequestOptions(model, options);
+		requestCustody?.registerForeground(requestOptions, foregroundOptions);
+		// Only unpinned session requests may replace the cache-warming entry.
+		if (!requestIdentity && options?.sessionId === sessionManager.getSessionId()) {
+			cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
+		}
+		return dispatchRuntime.streamSimple(model, context, requestOptions);
+	};
+
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -417,18 +451,35 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			messages: existingSession.messages,
 		},
 		convertToLlm: convertToLlmWithBlockImages,
-		streamFn: async (model, context, options) => {
-			const requestOptions = buildRequestOptions(model, options);
-			// Compaction and summaries use their own routing ids; only session requests
-			// replace the cache entry, so warming restarts from them. Keep warming while
-			// the current transcript still extends the request's prefix. Agent state may
-			// shallow-copy the messages array or refresh the model object without changing
-			// the provider request, so top-level object identity is not a valid cache key.
-			if (options?.sessionId === sessionManager.getSessionId()) {
-				cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
-			}
-			return modelRuntime.streamSimple(model, context, requestOptions);
-		},
+		loopStreamFn: requestCustody ? streamRequest : undefined,
+		streamFn: requestCustody
+			? (model) => {
+					const stream = createAssistantMessageEventStream();
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: {
+							role: "assistant",
+							content: [],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "error",
+							errorMessage: "Request identity refused: unsupported out-of-band request",
+							timestamp: Date.now(),
+						},
+					});
+					return stream;
+				}
+			: streamRequest,
 		onPayload: transformProviderPayload,
 		onResponse: handleProviderResponse,
 		onProviderStreamEvent: handleProviderStreamEvent,
@@ -466,7 +517,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
-		modelRuntime,
+		modelRuntime: dispatchRuntime,
 		cacheWarmer,
 		initialActiveToolNames,
 		usesDefaultTools: (options.tools === undefined || toolModifiers !== undefined) && !options.noTools,
@@ -478,10 +529,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	});
 
 	const extensionsResult = resourceLoader.getExtensions();
+	requestCustody?.attach(session);
 
 	return {
 		session,
 		extensionsResult,
 		modelFallbackMessage,
+		requestCustody,
 	};
 }

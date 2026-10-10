@@ -9,9 +9,11 @@ import {
 	normalizeContext,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { ModelRuntime } from "../src/core/model-runtime.ts";
+import { readRequestCustody } from "../src/core/request-custody.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -320,5 +322,385 @@ describe("createAgentSession stream options", () => {
 			"x-hook": "provider:model:explicit",
 		});
 		expect(options).not.toHaveProperty("transformHeaders");
+	});
+
+	async function strictFixture(changePayload: boolean) {
+		const token = `aaa.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "synthetic" } })).toString("base64")}.bbb`;
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.inMemory(),
+			modelsPath: null,
+			refreshOnCreate: false,
+		});
+		const auth = vi.spyOn(runtime, "getAuth").mockResolvedValue({ auth: { apiKey: token } });
+		vi.spyOn(runtime, "hasConfiguredAuth").mockReturnValue(true);
+		const model = { ...runtime.getModel("openai-codex", "gpt-6.1-sol")! };
+		const settingsManager = SettingsManager.inMemory({ transport: "sse", retry: { enabled: false } });
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+			extensionFactories: changePayload
+				? [
+						(pi) => {
+							pi.on("before_provider_request", () => ({ model: "wrong" }));
+						},
+					]
+				: [],
+		});
+		await resourceLoader.reload();
+		const fetch = vi.fn(
+			async (_input: string | URL | Request, _init?: RequestInit) =>
+				new Response(
+					`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } })}\n\n`,
+				),
+		);
+		vi.stubGlobal("fetch", fetch);
+		const created = await createAgentSession({
+			cwd,
+			agentDir,
+			model,
+			modelRuntime: runtime,
+			resourceLoader,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(cwd),
+			noTools: "all",
+			requestIdentity: {
+				provider: "openai-codex",
+				model: "gpt-6.1-sol",
+				route: "https://chatgpt.com/backend-api/codex/responses",
+			},
+		});
+		return { ...created, fetch, auth, settingsManager, resourceLoader };
+	}
+
+	it.each(["bug-report", "direct", "manual-conversion"] as const)(
+		"AK6449 P1: refuses concurrent %s before dispatch",
+		async (kind) => {
+			const fixture = await strictFixture(false);
+			const originalFetch = fixture.fetch.getMockImplementation()!;
+			let release!: () => void;
+			let ready!: () => void;
+			const reached = new Promise<void>((resolve) => {
+				ready = resolve;
+			});
+			fixture.fetch.mockImplementationOnce(
+				(input, init) =>
+					new Promise<Response>((resolve) => {
+						release = () => resolve(originalFetch(input, init));
+						ready();
+					}),
+			);
+			const foreground = fixture.session.prompt("foreground");
+			await reached;
+			try {
+				if (kind === "bug-report") {
+					await expect(
+						fixture.session.summarizeForBugReport({ signal: new AbortController().signal }),
+					).rejects.toThrow("unsupported");
+				} else {
+					const messages = [{ role: "user" as const, content: "out-of-band", timestamp: 1 }];
+					const converted =
+						kind === "manual-conversion" ? await fixture.session.agent.convertToLlm(messages) : messages;
+					const stream = await fixture.session.agent.streamFunction(
+						fixture.session.model!,
+						normalizeContext({ messages: converted }),
+						{ sessionId: fixture.session.sessionManager.getSessionId() },
+					);
+					expect((await stream.result()).errorMessage).toContain("unsupported");
+				}
+				expect(fixture.fetch).toHaveBeenCalledTimes(1);
+				expect(
+					readRequestCustody(fixture.requestCustody!.path).records.filter((r) => r.phase === "prepared"),
+				).toHaveLength(1);
+			} finally {
+				release();
+				await foreground;
+				fixture.session.dispose();
+				vi.unstubAllGlobals();
+			}
+		},
+	);
+
+	it.each(["virtual-provider", "openai-codex"])(
+		"AK6449 P1: refuses %s virtual routing before auth/transport",
+		async (provider) => {
+			const fixture = await strictFixture(false);
+			const runtime = fixture.session.modelRuntime;
+			const physical = fixture.session.model!;
+			fixture.auth.mockClear();
+			vi.spyOn(runtime, "checkAuth").mockResolvedValue({ type: "api_key", source: "synthetic" });
+			const route = vi.fn(() => ({ model: physical, thinkingLevel: "off" as const }));
+			runtime.registerVirtualModel({ provider, id: "virtual-pin", name: "virtual-pin", route });
+			try {
+				await fixture.session.setModel(runtime.getModel(provider, "virtual-pin")!);
+				await fixture.session.prompt("virtual");
+				expect(fixture.session.agent.state.errorMessage).toContain("unsupported");
+				expect(route).not.toHaveBeenCalled();
+				expect(fixture.auth).not.toHaveBeenCalled();
+				expect(fixture.fetch).not.toHaveBeenCalled();
+				expect(readRequestCustody(fixture.requestCustody!.path).records).toEqual([]);
+			} finally {
+				fixture.session.dispose();
+				vi.unstubAllGlobals();
+			}
+		},
+	);
+
+	it("AK6449 P2: public refusal is observable through async iteration and result", async () => {
+		const fixture = await strictFixture(false);
+		try {
+			const stream = await fixture.session.agent.streamFunction(
+				fixture.session.model!,
+				normalizeContext({ messages: [] }),
+			);
+			const events = [];
+			for await (const event of stream) events.push(event);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({
+				type: "error",
+				reason: "error",
+				error: { errorMessage: expect.stringContaining("unsupported") },
+			});
+			expect((await stream.result()).errorMessage).toContain("unsupported");
+			expect(fixture.fetch).not.toHaveBeenCalled();
+			expect(readRequestCustody(fixture.requestCustody!.path).records).toEqual([]);
+		} finally {
+			fixture.session.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it.each(["connect", "response"] as const)(
+		"AK6449 P2: pending WebSocket %s disposal drains custody",
+		async (phase) => {
+			const fixture = await strictFixture(false);
+			fixture.session.agent.transport = "websocket";
+			let ready!: () => void;
+			const reached = new Promise<void>((resolve) => {
+				ready = resolve;
+			});
+			const connect = vi.fn();
+			const send = vi.fn();
+			const close = vi.fn();
+			class MockWebSocket extends EventTarget {
+				static OPEN = 1;
+				readyState = 0;
+				constructor() {
+					super();
+					connect();
+					if (phase === "connect") ready();
+					else
+						queueMicrotask(() => {
+							this.readyState = 1;
+							this.dispatchEvent(new Event("open"));
+						});
+				}
+				send() {
+					send();
+					ready();
+				}
+				close() {
+					close();
+					this.readyState = 3;
+					this.dispatchEvent(new Event("close"));
+				}
+			}
+			vi.stubGlobal("WebSocket", MockWebSocket);
+			try {
+				const foreground = fixture.session.prompt("websocket dispose");
+				await reached;
+				fixture.session.dispose();
+				await foreground;
+				const readback = readRequestCustody(fixture.requestCustody!.path);
+				expect(readback.records.at(-1)?.phase).toBe("aborted");
+				expect(readback.unknown).toEqual([]);
+				expect(connect).toHaveBeenCalledTimes(1);
+				expect(send).toHaveBeenCalledTimes(phase === "connect" ? 0 : 1);
+				expect(close).toHaveBeenCalled();
+				expect(fixture.fetch).not.toHaveBeenCalled();
+			} finally {
+				fixture.session.dispose();
+				vi.unstubAllGlobals();
+			}
+		},
+	);
+
+	it("AK6449: successful provider retry retains a common run/call and both attempts", async () => {
+		const fixture = await strictFixture(false);
+		fixture.settingsManager.applyOverrides({ retry: { enabled: false, provider: { maxRetries: 1 } } });
+		fixture.fetch.mockImplementationOnce(
+			async () => new Response("temporary", { status: 503, headers: { "retry-after-ms": "1" } }),
+		);
+		try {
+			await fixture.session.prompt("successful retry");
+			const readback = readRequestCustody(fixture.requestCustody!.path);
+			expect(fixture.fetch).toHaveBeenCalledTimes(2);
+			expect(readback.records.map((r) => [r.attempt, r.phase])).toEqual([
+				[1, "prepared"],
+				[1, "dispatched"],
+				[1, "error"],
+				[2, "prepared"],
+				[2, "dispatched"],
+				[2, "completed"],
+			]);
+			expect(new Set(readback.records.map((r) => r.runId)).size).toBe(1);
+			expect(new Set(readback.records.map((r) => r.callId)).size).toBe(1);
+			expect(readback.unknown).toEqual([]);
+		} finally {
+			fixture.session.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("AK6449: foreground queued follow-up retains custody in the same run", async () => {
+		const fixture = await strictFixture(false);
+		const original = fixture.fetch.getMockImplementation()!;
+		fixture.fetch.mockImplementationOnce(async (input, init) => {
+			fixture.session.agent.followUp({ role: "user", content: "queued", timestamp: 1 });
+			return original(input, init);
+		});
+		try {
+			await fixture.session.prompt("follow up");
+			const readback = readRequestCustody(fixture.requestCustody!.path);
+			expect(fixture.fetch).toHaveBeenCalledTimes(2);
+			expect(readback.records.filter((r) => r.phase === "completed")).toHaveLength(2);
+			expect(new Set(readback.records.map((r) => r.runId)).size).toBe(1);
+			expect(readback.unknown).toEqual([]);
+		} finally {
+			fixture.session.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("AK6449 P2: disposal drains an admitted fetch abort before closing custody", async () => {
+		const fixture = await strictFixture(false);
+		let ready!: () => void;
+		const reached = new Promise<void>((resolve) => {
+			ready = resolve;
+		});
+		fixture.fetch.mockImplementationOnce(
+			(_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener(
+						"abort",
+						() => queueMicrotask(() => reject(new Error("Request was aborted"))),
+						{ once: true },
+					);
+					ready();
+				}),
+		);
+		const foreground = fixture.session.prompt("foreground");
+		await reached;
+		fixture.session.dispose();
+		await foreground;
+		const result = readRequestCustody(fixture.requestCustody!.path);
+		expect(result.records.at(-1)?.phase).toBe("aborted");
+		expect(result.unknown).toEqual([]);
+		vi.unstubAllGlobals();
+	});
+
+	it.each(["prepared", "dispatched"] as const)(
+		"AK6449 P2: disposal during %s observation drains its real terminal",
+		async (phase) => {
+			const fixture = await strictFixture(false);
+			const record = fixture.requestCustody!.record.bind(fixture.requestCustody);
+			vi.spyOn(fixture.requestCustody!, "record").mockImplementation((attempt) => {
+				record(attempt);
+				if (attempt.phase === phase) fixture.session.dispose();
+			});
+			try {
+				await fixture.session.prompt("dispose callback");
+				const readback = readRequestCustody(fixture.requestCustody!.path);
+				expect(readback.records.at(-1)?.phase).toBe("aborted");
+				expect(readback.unknown).toEqual([]);
+				expect(fixture.fetch).toHaveBeenCalledTimes(phase === "prepared" ? 0 : 1);
+			} finally {
+				fixture.session.dispose();
+				vi.unstubAllGlobals();
+			}
+		},
+	);
+
+	it("AK6449 P2: an exposed runtime can be reused independently after first-session disposal", async () => {
+		const first = await strictFixture(false);
+		const second = await createAgentSession({
+			cwd,
+			agentDir,
+			model: first.session.model!,
+			modelRuntime: first.session.modelRuntime,
+			settingsManager: first.settingsManager,
+			resourceLoader: first.resourceLoader,
+			sessionManager: SessionManager.inMemory(cwd),
+			noTools: "all",
+			requestIdentity: first.requestCustody!.pin,
+		});
+		try {
+			first.session.dispose();
+			await second.session.prompt("independent");
+			expect(first.fetch).toHaveBeenCalledTimes(1);
+			expect(readRequestCustody(second.requestCustody!.path).records.at(-1)?.phase).toBe("completed");
+		} finally {
+			second.session.dispose();
+			first.session.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("AK6449 P2: a journal retains identity refusal after an earlier transport terminal", async () => {
+		const fixture = await strictFixture(false);
+		fixture.settingsManager.applyOverrides({ retry: { enabled: false, provider: { maxRetries: 1 } } });
+		fixture.fetch.mockImplementationOnce(async () => {
+			fixture.session.model!.id = "wrong";
+			return new Response("temporary failure", { status: 503, headers: { "retry-after-ms": "1" } });
+		});
+		try {
+			await fixture.session.prompt("retry");
+			expect(fixture.fetch).toHaveBeenCalledTimes(1);
+			const records = readRequestCustody(fixture.requestCustody!.path).records;
+			expect(records.map((r) => [r.attempt, r.phase])).toEqual([
+				[1, "prepared"],
+				[1, "dispatched"],
+				[1, "error"],
+				[0, "error"],
+			]);
+		} finally {
+			fixture.session.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("AK6449: rejects a replacement extension payload and retains the first error independently", async () => {
+		const fixture = await strictFixture(true);
+		try {
+			await fixture.session.prompt("synthetic prompt");
+			expect(fixture.fetch).not.toHaveBeenCalled();
+			expect(fixture.requestCustody).toBeDefined();
+			const readback = readRequestCustody(fixture.requestCustody!.path);
+			expect(readback.records.at(-1)?.phase).toBe("error");
+			expect(readback.records.at(-1)?.serializedModel).toBeUndefined();
+			expect(
+				readback.records.every((record) => record.sessionId === fixture.session.sessionManager.getSessionId()),
+			).toBe(true);
+			expect(JSON.stringify(readback.records)).not.toContain("synthetic prompt");
+		} finally {
+			fixture.session.dispose();
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("AK6449: forwards exact pins into production transport and separates settled runs", async () => {
+		const fixture = await strictFixture(false);
+		try {
+			await fixture.session.prompt("first synthetic prompt");
+			await fixture.session.prompt("second synthetic prompt");
+			expect(fixture.fetch).toHaveBeenCalledTimes(2);
+			const readback = readRequestCustody(fixture.requestCustody!.path);
+			expect(readback.records.filter((record) => record.phase === "prepared")).toHaveLength(2);
+			expect(new Set(readback.records.map((record) => record.runId)).size).toBe(2);
+			expect(readback.unknown).toEqual([]);
+		} finally {
+			fixture.session.dispose();
+			vi.unstubAllGlobals();
+		}
 	});
 });

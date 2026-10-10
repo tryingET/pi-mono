@@ -6,7 +6,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
+import { captureRequestIdentity, type ImageContent, modelsAreEqual, RequestIdentityError } from "@earendil-works/pi-ai";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
@@ -448,7 +448,7 @@ export async function createSessionManager(
 	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
 }
 
-function buildSessionOptions(
+export function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
@@ -462,17 +462,31 @@ function buildSessionOptions(
 	const options: CreateAgentSessionOptions = {};
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	let cliThinkingFromModel = false;
+	if (parsed.requestIdentity) {
+		const pin = captureRequestIdentity(parsed.requestIdentity);
+		if (
+			(parsed.provider && parsed.provider !== pin.provider) ||
+			parsed.models ||
+			(parsed.model && parsed.model !== pin.model && parsed.model !== `${pin.provider}/${pin.model}`)
+		)
+			throw new RequestIdentityError("conflicting CLI selection");
+		const model = modelRuntime.getPhysicalModel(pin.provider, pin.model);
+		if (!model) throw new RequestIdentityError("unknown exact catalog model");
+		modelRuntime.assertStrictRequestIdentity(model, pin);
+		options.model = model;
+		options.requestIdentity = pin;
+	}
 
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
-	if (parsed.provider && !parsed.model) {
+	if (parsed.provider && !parsed.model && !parsed.requestIdentity) {
 		diagnostics.push({
 			type: "error",
 			message: `--provider requires --model (for example: --provider ${parsed.provider} --model <pattern>)`,
 		});
 	}
-	if (parsed.model) {
+	if (parsed.model && !parsed.requestIdentity) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,
@@ -496,7 +510,7 @@ function buildSessionOptions(
 		}
 	}
 
-	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
+	if (!parsed.requestIdentity && !options.model && scopedModels.length > 0 && !hasExistingSession) {
 		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
@@ -628,6 +642,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
+	const pinnedRequestIdentity = parsed.requestIdentity ? captureRequestIdentity(parsed.requestIdentity) : undefined;
 
 	if (parsed.version) {
 		console.log(VERSION);
@@ -809,7 +824,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
-			modelPatterns && modelPatterns.length > 0
+			!pinnedRequestIdentity && modelPatterns && modelPatterns.length > 0
 				? await resolveModelScope(modelPatterns, modelRuntime, { signal: AbortSignal.timeout(15_000) })
 				: [];
 		const {
@@ -817,7 +832,7 @@ export async function main(args: string[], options?: MainOptions) {
 			cliThinkingFromModel,
 			diagnostics: sessionOptionDiagnostics,
 		} = buildSessionOptions(
-			parsed,
+			{ ...parsed, requestIdentity: pinnedRequestIdentity },
 			scopedModels,
 			sessionManager.buildSessionContext().messages.length > 0,
 			modelRuntime,
@@ -841,6 +856,7 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager,
 			sessionStartEvent,
 			model: sessionOptions.model,
+			requestIdentity: sessionOptions.requestIdentity,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,

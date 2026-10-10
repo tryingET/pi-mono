@@ -9,6 +9,7 @@ import type { OpenAICodexResponsesOptions } from "./api/openai-codex-responses.t
 import type { OpenAICompletionsOptions } from "./api/openai-completions.ts";
 import type { OpenAIResponsesOptions } from "./api/openai-responses.ts";
 import type { PiMessagesOptions } from "./api/pi-messages.ts";
+import type { RequestAttempt, RequestIdentity } from "./request-identity.ts";
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.ts";
 import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
@@ -136,6 +137,10 @@ export interface ProviderResponse {
 
 /** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
 export interface ProviderRequestOptions<TModel = Model<Api>> {
+	/** Only the audited Codex path supports strict final-wire identity. */ requestIdentity?: RequestIdentity;
+	/** Must return synchronously; failure blocks subsequent inference effects. */
+	onRequestAttempt?: (attempt: RequestAttempt) => void;
+
 	signal?: AbortSignal;
 	/** Explicit parent context for telemetry produced by this logical request. */
 	telemetryContext?: TelemetryContext;

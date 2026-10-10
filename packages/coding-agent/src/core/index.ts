@@ -94,4 +94,5 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export { RequestCustody, type RequestCustodyRecord, readRequestCustody } from "./request-custody.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";

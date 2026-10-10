@@ -7,6 +7,7 @@ import type {
 } from "openai/resources/responses/responses.js";
 
 import { clampThinkingLevel } from "../models.ts";
+import { assertRequestIdentity, RequestIdentityError, RequestIdentityGuard } from "../request-identity.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -261,7 +262,15 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			timestamp: Date.now(),
 		};
 
+		let identityGuard: RequestIdentityGuard | undefined;
+		let strictFetch: typeof globalThis.fetch | undefined;
 		try {
+			if (options?.requestIdentity) {
+				identityGuard = new RequestIdentityGuard(options.requestIdentity, model, options.onRequestAttempt);
+				assertRequestIdentity(identityGuard.pin, model);
+				strictFetch = options.fetch ?? globalThis.fetch;
+				if (strictFetch !== globalThis.fetch) throw new RequestIdentityError("unsupported fetch executor");
+			}
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
@@ -289,6 +298,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				websocketRequestId,
 			);
 			const bodyJson = JSON.stringify(body);
+			identityGuard?.check(bodyJson, resolveCodexUrl(model.baseUrl));
+			// Strict WebSocket transforms operate on checked JSON, not hook getters/toJSON.
+			if (identityGuard) body = JSON.parse(bodyJson) as RequestBody;
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
@@ -325,12 +337,14 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 							accountId,
 							grammarToolInputProperties,
 							options,
+							identityGuard,
 						);
 
 						if (options?.signal?.aborted) {
 							throw new Error("Request was aborted");
 						}
 						assertSuccessfulOutput(output);
+						identityGuard?.finish("completed");
 						stream.push({
 							type: "done",
 							reason: output.stopReason,
@@ -340,6 +354,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						return;
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
+						identityGuard?.finish(aborted ? "aborted" : "error");
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
 						if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
@@ -381,6 +396,16 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				sseHeaders.set("content-encoding", "zstd");
 			}
 			const sseBody: Uint8Array | string = compressedBody ?? bodyJson;
+			let finalSseJson = bodyJson;
+			if (identityGuard && compressedBody) {
+				try {
+					const decoded = loadNodeZlib()?.zstdDecompressSync(compressedBody);
+					if (!decoded) throw new Error("unsupported decoder");
+					finalSseJson = new TextDecoder("utf-8", { fatal: true }).decode(decoded);
+				} catch {
+					throw new RequestIdentityError("unsupported serialized compression");
+				}
+			}
 
 			// Fetch with retry logic for rate limits and transient errors
 			let response: Response | undefined;
@@ -393,17 +418,34 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				}
 
 				try {
+					const requestUrl = resolveCodexUrl(model.baseUrl);
+					identityGuard?.prepare(finalSseJson, requestUrl, "sse");
 					const headerTimeoutSignal =
 						httpTimeoutMs !== undefined && httpTimeoutMs > 0 ? AbortSignal.timeout(httpTimeoutMs) : undefined;
-					const combinedSignal = combineAbortSignals([options?.signal, headerTimeoutSignal]);
+					const recorderAbort = identityGuard ? new AbortController() : undefined;
+					const combinedSignal = combineAbortSignals([
+						options?.signal,
+						headerTimeoutSignal,
+						recorderAbort?.signal,
+					]);
 					try {
-						response = await (options?.fetch ?? globalThis.fetch)(resolveCodexUrl(model.baseUrl), {
+						identityGuard?.check(finalSseJson, requestUrl);
+						if (identityGuard && options?.signal?.aborted) throw new Error("Request was aborted");
+						if (identityGuard && strictFetch !== globalThis.fetch)
+							throw new RequestIdentityError("fetch executor changed");
+						const pendingResponse = (strictFetch ?? options?.fetch ?? globalThis.fetch)(requestUrl, {
 							method: "POST",
+							...(identityGuard ? { redirect: "error" as const } : {}),
 							headers: sseHeaders,
 							body: sseBody,
 							signal: combinedSignal.signal,
 						});
+						// Observe even if the post-dispatch recorder refuses before the await.
+						if (identityGuard) void pendingResponse.catch(() => {});
+						identityGuard?.dispatched();
+						response = await pendingResponse;
 					} catch (error) {
+						recorderAbort?.abort();
 						if (headerTimeoutSignal?.aborted && !options?.signal?.aborted) {
 							throw new Error(`Codex SSE response headers timed out after ${httpTimeoutMs}ms`);
 						}
@@ -428,6 +470,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 								? BASE_DELAY_MS * 2 ** attempt
 								: validateRetryDelayMs(retryAfterDelayMs, options);
 
+						identityGuard?.finish("error");
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
@@ -440,6 +483,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					const info = await parseErrorResponse(fakeResponse);
 					throw new Error(info.friendlyMessage || info.message);
 				} catch (error) {
+					identityGuard?.finish(options?.signal?.aborted ? "aborted" : "error");
+					if (error instanceof RequestIdentityError) throw error;
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
@@ -479,16 +524,23 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			}
 
 			assertSuccessfulOutput(output);
+			identityGuard?.finish("completed");
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			let finalError = error;
+			try {
+				identityGuard?.finish(options?.signal?.aborted ? "aborted" : "error");
+			} catch (recordError) {
+				finalError = recordError;
+			}
 			for (const block of output.content) {
 				// Streaming scratch buffers are only used during parsing; never persist them.
 				delete (block as { partialJson?: string }).partialJson;
 				delete (block as { customInput?: unknown }).customInput;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatProviderError(normalizeProviderError(error));
+			output.errorMessage = formatProviderError(normalizeProviderError(finalError));
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -713,6 +765,7 @@ class ProviderStreamEventCallbackError extends Error {
 
 function isCodexNonTransportError(error: unknown): boolean {
 	return (
+		error instanceof RequestIdentityError ||
 		error instanceof CodexApiError ||
 		error instanceof CodexProtocolError ||
 		error instanceof ProviderStreamEventCallbackError
@@ -884,6 +937,7 @@ interface CachedWebSocketContinuationState {
 
 interface CachedWebSocketConnection {
 	socket: WebSocketLike;
+	url: string;
 	busy: boolean;
 	createdAt: number;
 	idleTimer?: ReturnType<typeof setTimeout>;
@@ -1078,8 +1132,11 @@ async function connectWebSocket(
 	signal?: AbortSignal,
 	connectTimeoutMs = DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS,
 	env?: ProviderEnv,
+	identityGuard?: RequestIdentityGuard,
 ): Promise<WebSocketLike> {
+	if (identityGuard && signal?.aborted) throw new Error("Request was aborted");
 	const WebSocketCtor = await getWebSocketConstructor(env);
+	if (identityGuard && signal?.aborted) throw new Error("Request was aborted");
 	if (!WebSocketCtor) {
 		throw new Error("WebSocket transport is not available in this runtime");
 	}
@@ -1093,6 +1150,8 @@ async function connectWebSocket(
 		let socket: WebSocketLike;
 
 		try {
+			identityGuard?.check(JSON.stringify({ type: "response.create", model: identityGuard.pin.model }), url);
+			if (identityGuard && signal?.aborted) throw new Error("Request was aborted");
 			socket = new WebSocketCtor(url, { headers: wsHeaders });
 		} catch (error) {
 			reject(error instanceof Error ? error : new Error(String(error)));
@@ -1158,6 +1217,7 @@ async function acquireWebSocket(
 	signal?: AbortSignal,
 	connectTimeoutMs?: number,
 	env?: ProviderEnv,
+	identityGuard?: RequestIdentityGuard,
 ): Promise<{
 	socket: WebSocketLike;
 	entry?: CachedWebSocketConnection;
@@ -1165,7 +1225,7 @@ async function acquireWebSocket(
 	release: (options?: { keep?: boolean }) => void;
 }> {
 	if (!sessionId) {
-		const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env);
+		const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env, identityGuard);
 		return {
 			socket,
 			reused: false,
@@ -1175,6 +1235,7 @@ async function acquireWebSocket(
 
 	let accountEntries = websocketSessionCache.get(sessionId);
 	const cached = accountEntries?.get(accountId);
+	if (identityGuard && cached && cached.url !== url) throw new RequestIdentityError("cached transport route changed");
 	if (cached) {
 		if (cached.idleTimer) {
 			clearTimeout(cached.idleTimer);
@@ -1204,7 +1265,7 @@ async function acquireWebSocket(
 			};
 		}
 		if (cached.busy) {
-			const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env);
+			const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env, identityGuard);
 			return {
 				socket,
 				reused: false,
@@ -1220,8 +1281,8 @@ async function acquireWebSocket(
 		}
 	}
 
-	const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env);
-	const entry: CachedWebSocketConnection = { socket, busy: true, createdAt: Date.now() };
+	const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env, identityGuard);
+	const entry: CachedWebSocketConnection = { socket, url, busy: true, createdAt: Date.now() };
 	accountEntries = websocketSessionCache.get(sessionId);
 	if (!accountEntries) {
 		accountEntries = new Map();
@@ -1504,7 +1565,10 @@ async function processWebSocketStream(
 	accountId: string,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
+	identityGuard?: RequestIdentityGuard,
 ): Promise<void> {
+	identityGuard?.prepare(JSON.stringify({ type: "response.create", ...body }), url, "websocket");
+	if (identityGuard && options?.signal?.aborted) throw new Error("Request was aborted");
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1513,6 +1577,7 @@ async function processWebSocketStream(
 		options?.signal,
 		websocketConnectTimeoutMs,
 		options?.env,
+		identityGuard,
 	);
 	let keepConnection = true;
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
@@ -1539,7 +1604,11 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		const frame = JSON.stringify({ type: "response.create", ...requestBody });
+		identityGuard?.check(frame, url);
+		if (identityGuard && options?.signal?.aborted) throw new Error("Request was aborted");
+		socket.send(frame);
+		identityGuard?.dispatched();
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
 				mapCodexEvents(

@@ -2,6 +2,51 @@ import { describe, expect, test } from "vitest";
 import { normalizeSessionName, parseArgs } from "../src/cli/args.ts";
 
 describe("parseArgs", () => {
+	// AK6449: a builtin exact pin must not become an extension flag or fuzzy pattern.
+	describe("--request-identity", () => {
+		const pin = {
+			provider: "openai-codex",
+			model: "gpt-6.1-sol",
+			route: "https://chatgpt.com/backend-api/codex/responses",
+		};
+		test.each([false, true])("accepts bounded exact JSON, equals=%s", (equals) => {
+			const raw = JSON.stringify(pin);
+			const args = equals ? [`--request-identity=${raw}`] : ["--request-identity", raw];
+			const parsed = parseArgs(args);
+			expect(parsed.requestIdentity).toEqual(pin);
+			expect(Object.isFrozen(parsed.requestIdentity)).toBe(true);
+			expect(parsed.unknownFlags.size).toBe(0);
+			expect(parsed.diagnostics).toEqual([]);
+		});
+		test.each([
+			"null",
+			"[]",
+			"{}",
+			"{",
+			JSON.stringify({ ...pin, extra: true }),
+			JSON.stringify({ ...pin, provider: "openai" }),
+			JSON.stringify({ ...pin, model: "" }),
+			JSON.stringify({ ...pin, route: "https://wrong.invalid" }),
+			JSON.stringify({ ...pin, model: "x".repeat(257) }),
+			" ".repeat(1025),
+			'{"provider":"openai-codex","model":"wrong","model":"gpt-6.1-sol","route":"https://chatgpt.com/backend-api/codex/responses"}',
+			'{"provider":"openai-codex","model":"wrong","m\\u006fdel":"gpt-6.1-sol","route":"https://chatgpt.com/backend-api/codex/responses"}',
+		])("refuses malformed, ambiguous or unsupported identity %j", (raw) => {
+			const parsed = parseArgs(["--request-identity", raw]);
+			expect(parsed.diagnostics.some((d) => d.type === "error")).toBe(true);
+			expect(parsed.unknownFlags.size).toBe(0);
+		});
+		test("rejects duplicate flags and missing values without consuming following options", () => {
+			expect(
+				parseArgs(["--request-identity", JSON.stringify(pin), "--request-identity", JSON.stringify(pin)])
+					.diagnostics,
+			).not.toEqual([]);
+			const parsed = parseArgs(["--request-identity", "--version"]);
+			expect(parsed.version).toBe(true);
+			expect(parsed.diagnostics.some((d) => d.type === "error")).toBe(true);
+		});
+	});
+
 	describe("--version flag", () => {
 		test("parses --version flag", () => {
 			const result = parseArgs(["--version"]);

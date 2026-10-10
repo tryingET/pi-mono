@@ -11,6 +11,7 @@ import {
 	type AuthOperationOptions,
 	type AuthResult,
 	type AuthType,
+	assertRequestIdentity,
 	type ClassifierApi,
 	type ClassifierContext,
 	type ClassifierModel,
@@ -20,6 +21,7 @@ import {
 	type Credential,
 	type CredentialInfo,
 	type CredentialStore,
+	captureRequestIdentity,
 	clampThinkingLevel,
 	createModels,
 	type DeferredCancelOptions,
@@ -53,8 +55,12 @@ import {
 	type Provider,
 	type ProviderHeaders,
 	type ProviderRequestOptions,
+	type RequestIdentity,
+	RequestIdentityError,
+	recordRequestAttempt,
 	type SimpleStreamOptions,
 	type StreamOptions,
+	uuidv7,
 } from "@earendil-works/pi-ai";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
 import {
@@ -648,6 +654,16 @@ export class ModelRuntime implements Models {
 		return check ? { configured: true, source: "environment", label: check.source } : { configured: false };
 	}
 
+	assertStrictRequestIdentity(model: AnyModel, pin: Readonly<RequestIdentity>): void {
+		assertRequestIdentity(pin, model);
+		if (
+			!this.getPhysicalModel(pin.provider, pin.model) ||
+			this.models.getProvider(pin.provider) !== this.builtins.get(pin.provider)
+		) {
+			throw new RequestIdentityError("unsupported executor or catalog model");
+		}
+	}
+
 	private async prepareRequest<
 		TModel extends AnyModel,
 		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
@@ -659,34 +675,67 @@ export class ModelRuntime implements Models {
 		model: TModel;
 		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 	}> {
-		const provider = this.models.getProvider(model.provider);
-		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
-		const resolution = await this.getAuth(model, {
-			apiKey: options?.apiKey,
-			env: options?.env,
-			signal: options?.signal,
-		});
-		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
+		const pin = options?.requestIdentity ? captureRequestIdentity(options.requestIdentity) : undefined;
+		const recorder = options?.onRequestAttempt;
+		try {
+			const provider = this.models.getProvider(model.provider);
+			if (pin) {
+				this.assertStrictRequestIdentity(model, pin);
+				if (options && "deferred" in options && options.deferred)
+					throw new RequestIdentityError("unsupported deferred executor");
+				if (options?.fetch && options.fetch !== globalThis.fetch)
+					throw new RequestIdentityError("unsupported fetch executor");
+			}
+			if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+			const resolution = await this.getAuth(model, {
+				apiKey: options?.apiKey,
+				env: options?.env,
+				signal: options?.signal,
+			});
+			if (pin) {
+				assertRequestIdentity(pin, model);
+				if (this.models.getProvider(pin.provider) !== provider) throw new RequestIdentityError("executor changed");
+			}
+			if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 
-		const { transformHeaders, ...rawProviderOptions } = options ?? {};
-		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
-		let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
-		if (transformHeaders) headers = await transformHeaders(headers ?? {});
-		const env =
-			resolution.env || providerOptions.env
-				? { ...(resolution.env ?? {}), ...(providerOptions.env ?? {}) }
-				: undefined;
-		const requestModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
-		return {
-			provider,
-			model: requestModel,
-			options: {
-				...providerOptions,
-				apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
-				headers,
-				env,
-			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>,
-		};
+			const { transformHeaders, ...rawProviderOptions } = options ?? {};
+			const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> &
+				ProviderRequestOptions<TModel>;
+			let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
+			if (transformHeaders) headers = await transformHeaders(headers ?? {});
+			const env =
+				resolution.env || providerOptions.env
+					? { ...(resolution.env ?? {}), ...(providerOptions.env ?? {}) }
+					: undefined;
+			const requestModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
+			if (pin) {
+				assertRequestIdentity(pin, model);
+				assertRequestIdentity(pin, requestModel);
+				if (this.models.getProvider(pin.provider) !== provider) throw new RequestIdentityError("executor changed");
+			}
+			return {
+				provider,
+				model: requestModel,
+				options: {
+					...providerOptions,
+					...(pin ? { requestIdentity: pin, onRequestAttempt: recorder } : {}),
+					apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
+					headers,
+					env,
+				} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>,
+			};
+		} catch (error) {
+			if (pin)
+				recordRequestAttempt(recorder, {
+					...pin,
+					api: "openai-codex-responses",
+					callId: uuidv7(),
+					attempt: 0,
+					transport: "sse",
+					phase: options?.signal?.aborted ? "aborted" : "error",
+				});
+			throw error;
+		}
 	}
 
 	stream<TApi extends Api>(
@@ -716,6 +765,10 @@ export class ModelRuntime implements Models {
 	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
 		const transcript = normalizeContext(context);
 		if (isVirtualModel(model)) {
+			if (options?.requestIdentity)
+				return lazyStream(model, async () => {
+					throw new RequestIdentityError("unsupported virtual executor");
+				});
 			// Requests outside the agent loop are routed here. Callers sized them before routing, so
 			// cap the output budget to the routed model.
 			return lazyStream(model, async () => {
@@ -751,6 +804,7 @@ export class ModelRuntime implements Models {
 		options?: ModelsDeferredFetchOptions,
 	): AssistantMessageEventStream {
 		return lazyStream(model, async () => {
+			if (options?.requestIdentity) throw new RequestIdentityError("unsupported deferred executor");
 			assertChatModel(model);
 			const prepared = await this.prepareRequest(model, options);
 			if (!prepared.provider.fetchDeferred) {
@@ -773,6 +827,7 @@ export class ModelRuntime implements Models {
 		handle: DeferredHandle,
 		options?: ModelsDeferredCancelOptions,
 	): Promise<void> {
+		if (options?.requestIdentity) throw new RequestIdentityError("unsupported deferred executor");
 		assertChatModel(model);
 		const prepared = await this.prepareRequest(model, options);
 		if (!prepared.provider.cancelDeferred) {
@@ -787,6 +842,7 @@ export class ModelRuntime implements Models {
 		options?: ModelsImagesOptions,
 	): Promise<AssistantImages> {
 		try {
+			if (options?.requestIdentity) throw new RequestIdentityError("unsupported image executor");
 			assertImageModel(model);
 			const prepared = await this.prepareRequest(model, options);
 			if (!prepared.provider.generateImages) {
@@ -804,6 +860,7 @@ export class ModelRuntime implements Models {
 		options?: ModelsClassifierOptions,
 	): Promise<ClassifierResult> {
 		try {
+			if (options?.requestIdentity) throw new RequestIdentityError("unsupported classifier executor");
 			assertClassifierModel(model);
 			assertClassifierInputSupported(model, context);
 			const prepared = await this.prepareRequest(model, options);

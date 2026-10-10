@@ -1,5 +1,5 @@
 import { type AuthType, type CredentialStore, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 
@@ -322,5 +322,68 @@ describe("ModelRuntime auth options", () => {
 			provider: { id: "extension-oauth", name: "Extension OAuth" },
 			method: { name: "Extension subscription", isSubscription: true },
 		});
+	});
+});
+
+// AK6449: unsupported strict dispatch must refuse before authentication resolution.
+describe("ModelRuntime strict request preflight", () => {
+	const pin = {
+		provider: "openai-codex",
+		model: "gpt-6.1-sol",
+		route: "https://chatgpt.com/backend-api/codex/responses",
+	};
+	it.each(["api", "route", "model", "executor"] as const)("refuses %s before auth", async (kind) => {
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.inMemory(),
+			modelsPath: null,
+			refreshOnCreate: false,
+		});
+		const original = runtime.getModel("openai-codex", "gpt-6.1-sol")!;
+		expect(original).toBeDefined();
+		const model = { ...original };
+		if (kind === "api") model.api = "openai-responses";
+		if (kind === "route") model.baseUrl = "https://wrong.invalid";
+		if (kind === "model") model.id = "unknown";
+		if (kind === "executor")
+			runtime.registerProvider("openai-codex", {
+				api: "openai-codex-responses",
+				streamSimple: () => {
+					throw new Error("must not execute");
+				},
+			});
+		const auth = vi.spyOn(runtime, "getAuth");
+		const fetch = vi.fn();
+		const result = await runtime.completeSimple(
+			model,
+			{ messages: [] },
+			{ requestIdentity: pin, fetch, apiKey: "synthetic" },
+		);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Request identity");
+		expect(auth).not.toHaveBeenCalled();
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it("captures pins before auth awaits and rejects original-model mutation afterwards", async () => {
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.inMemory(),
+			modelsPath: null,
+			refreshOnCreate: false,
+		});
+		const model = { ...runtime.getModel("openai-codex", "gpt-6.1-sol")! };
+		const mutablePin = { ...pin };
+		const auth = vi.spyOn(runtime, "getAuth").mockImplementation(async () => {
+			await Promise.resolve();
+			mutablePin.model = "wrong";
+			model.id = "wrong";
+			return { auth: { apiKey: "synthetic" } };
+		});
+		const fetch = vi.fn();
+		vi.stubGlobal("fetch", fetch);
+		const result = await runtime.completeSimple(model, { messages: [] }, { requestIdentity: mutablePin, fetch });
+		vi.unstubAllGlobals();
+		expect(auth).toHaveBeenCalledTimes(1);
+		expect(result.errorMessage).toContain("Request identity");
+		expect(fetch).not.toHaveBeenCalled();
 	});
 });

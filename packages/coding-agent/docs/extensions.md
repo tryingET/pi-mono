@@ -259,6 +259,8 @@ Keep tool and event behavior independent from rendering so non-interactive modes
 
 Pi reports handler errors and continues where possible. A `tool_call` handler failure blocks the tool as a fail-safe; a tool execution failure becomes an error result for the model.
 
+Do not enforce an exact request identity by throwing inside a provider hook: handler errors can be swallowed. Opted-in builtin Codex SDK/CLI sessions perform final core serialization checks outside that boundary and keep a separate host-owned attempt journal. Non-identity payload changes remain allowed, while unsupported background/nested request paths refuse or remain unenrolled. See [Exact request identity and custody](model-request-contract.md); these checks assume trusted same-process extensions, not a malicious-extension sandbox.
+
 Release resources in `session_shutdown` even when normal operation attempted cleanup.
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
 Use `ctx.shutdown()` to request an orderly process shutdown.

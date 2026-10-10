@@ -2743,3 +2743,348 @@ describe("openai-codex streaming", () => {
 		expect(codexRequests).toBe(4);
 	});
 });
+
+// AK6449: test the actual adapter/serializer, not a test-only identity validator.
+describe("strict Codex request identity", () => {
+	const route = "https://chatgpt.com/backend-api/codex/responses";
+	function model(): Model<"openai-codex-responses"> {
+		return {
+			id: "gpt-6.1-sol",
+			name: "Pinned",
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		};
+	}
+	const context = () => normalizeContext({ messages: [{ role: "user", content: "synthetic", timestamp: 1 }] });
+	const identity = () => ({ provider: "openai-codex", model: "gpt-6.1-sol", route });
+	function socketFixture(mode: "ok" | "connect-error" | "limit-once" = "ok", onOpen?: () => void) {
+		const sent: Record<string, unknown>[] = [];
+		const connections: string[] = [];
+		class Socket extends EventTarget {
+			readyState = 1;
+			constructor(url: string) {
+				super();
+				connections.push(url);
+				if (mode === "connect-error") throw new Error("synthetic transport failure");
+				queueMicrotask(() => {
+					onOpen?.();
+					this.dispatchEvent(new Event("open"));
+				});
+			}
+			send(data: string) {
+				sent.push(JSON.parse(data) as Record<string, unknown>);
+				const reply =
+					mode === "limit-once" && sent.length === 1
+						? { type: "error", error: { code: "websocket_connection_limit_reached" } }
+						: {
+								type: "response.completed",
+								response: {
+									id: `resp${sent.length}`,
+									status: "completed",
+									usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+								},
+							};
+				queueMicrotask(() =>
+					this.dispatchEvent(Object.assign(new Event("message"), { data: JSON.stringify(reply) })),
+				);
+			}
+			close() {
+				this.readyState = 3;
+			}
+		}
+		vi.stubGlobal("WebSocket", Socket);
+		const fetch = vi.fn(async () => new Response(buildSSEPayload({ status: "completed" })));
+		vi.stubGlobal("fetch", fetch);
+		return { sent, connections, fetch };
+	}
+
+	it("checks successful cached delta frames and retains every transport attempt", async () => {
+		const f = socketFixture();
+		const records: Array<{ phase: string; serializedModel?: string }> = [];
+		const options = {
+			apiKey: mockToken(),
+			transport: "websocket-cached" as const,
+			sessionId: "strict-cache",
+			requestIdentity: identity(),
+			onRequestAttempt: (r: { phase: string; serializedModel?: string }) => {
+				records.push(r);
+			},
+		};
+		const firstContext = context();
+		const first = await streamOpenAICodexResponses(model(), firstContext, options).result();
+		const second = await streamOpenAICodexResponses(
+			model(),
+			normalizeContext({
+				messages: [...firstContext.messages, first, { role: "user", content: "next", timestamp: 2 }],
+			}),
+			options,
+		).result();
+		expect(first.stopReason).toBe("stop");
+		expect(second.stopReason).toBe("stop");
+		expect(f.connections).toHaveLength(1);
+		expect(f.sent).toHaveLength(2);
+		expect(f.sent[1]).toMatchObject({ type: "response.create", model: "gpt-6.1-sol", previous_response_id: "resp1" });
+		expect(records.map((r) => r.phase)).toEqual([
+			"prepared",
+			"dispatched",
+			"completed",
+			"prepared",
+			"dispatched",
+			"completed",
+		]);
+		expect(records.every((r) => r.serializedModel === "gpt-6.1-sol")).toBe(true);
+		expect(f.fetch).not.toHaveBeenCalled();
+	});
+
+	it.each(["connect-error", "limit-once"] as const)("rechecks identity across %s fallback/retry", async (mode) => {
+		const f = socketFixture(mode);
+		const records: Array<{ phase: string; attempt: number; transport: string }> = [];
+		const result = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			requestIdentity: identity(),
+			onRequestAttempt: (r) => {
+				records.push(r);
+			},
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(records.filter((r) => r.phase === "prepared").map((r) => r.attempt)).toEqual([1, 2]);
+		expect(records.filter((r) => r.phase === "error")).toHaveLength(1);
+		expect(records.at(-1)?.phase).toBe("completed");
+		expect(f.fetch).toHaveBeenCalledTimes(mode === "connect-error" ? 1 : 0);
+	});
+
+	it("refuses an existing cached socket bound to a different route", async () => {
+		const f = socketFixture();
+		const wrongRouteModel = { ...model(), baseUrl: "https://wrong.invalid" };
+		await streamOpenAICodexResponses(wrongRouteModel, context(), {
+			apiKey: mockToken(),
+			sessionId: "route-cache",
+			transport: "websocket-cached",
+		}).result();
+		const result = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			sessionId: "route-cache",
+			transport: "websocket-cached",
+			requestIdentity: identity(),
+		}).result();
+		expect(result.errorMessage).toContain("cached transport route changed");
+		expect(f.connections).toHaveLength(1);
+		expect(f.sent).toHaveLength(1);
+		expect(f.fetch).not.toHaveBeenCalled();
+	});
+
+	it.each(["already", "prepared"] as const)("never sends on an aborted cached socket (%s)", async (when) => {
+		const f = socketFixture();
+		const controller = new AbortController();
+		await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			sessionId: "abort-cache",
+			transport: "websocket-cached",
+		}).result();
+		if (when === "already") controller.abort();
+		const result = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			sessionId: "abort-cache",
+			transport: "websocket-cached",
+			requestIdentity: identity(),
+			signal: controller.signal,
+			onRequestAttempt: (r) => {
+				if (when === "prepared" && r.phase === "prepared") controller.abort();
+			},
+		}).result();
+		expect(result.stopReason).toBe("aborted");
+		expect(f.connections).toHaveLength(1);
+		expect(f.sent).toHaveLength(1);
+		expect(f.fetch).not.toHaveBeenCalled();
+	});
+
+	it("rechecks model identity after connection opening before sending or fallback", async () => {
+		const m = model();
+		const f = socketFixture("ok", () => {
+			m.id = "wrong";
+		});
+		const result = await streamOpenAICodexResponses(m, context(), {
+			apiKey: mockToken(),
+			requestIdentity: identity(),
+		}).result();
+		expect(result.errorMessage).toContain("Request identity");
+		expect(f.connections).toHaveLength(1);
+		expect(f.sent).toHaveLength(0);
+		expect(f.fetch).not.toHaveBeenCalled();
+	});
+
+	it("refuses custom fetch and observes asynchronous/dispatch recorder rejection", async () => {
+		const f = socketFixture();
+		const custom = vi.fn();
+		const refused = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: custom,
+			requestIdentity: identity(),
+		}).result();
+		expect(refused.errorMessage).toContain("unsupported fetch executor");
+		expect(custom).not.toHaveBeenCalled();
+		const asynchronous = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			transport: "sse",
+			requestIdentity: identity(),
+			onRequestAttempt: async () => {
+				throw new Error("synthetic async rejection");
+			},
+		}).result();
+		expect(asynchronous.stopReason).toBe("error");
+		expect(f.fetch).not.toHaveBeenCalled();
+		const rejectedFetch = vi.fn(async () => {
+			throw new Error("synthetic fetch rejection");
+		});
+		vi.stubGlobal("fetch", rejectedFetch);
+		const dispatched = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			transport: "sse",
+			requestIdentity: identity(),
+			onRequestAttempt: (r) => {
+				if (r.phase === "dispatched") throw new Error("synthetic dispatched rejection");
+			},
+		}).result();
+		expect(dispatched.errorMessage).toContain("attempt recorder failed");
+		expect(rejectedFetch).toHaveBeenCalledTimes(1);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	});
+
+	it.each(["sse", "websocket", "websocket-cached", "auto"] as const)(
+		"refuses post-hook replacement/mutation/missing/toJSON drift before %s effects",
+		async (transport) => {
+			for (const hook of [
+				() => ({ model: "wrong" }),
+				(payload: unknown) => {
+					(payload as Record<string, unknown>).model = "wrong";
+				},
+				() => ({ input: [] }),
+				() => ({ model: "gpt-6.1-sol", toJSON: () => ({ model: "wrong" }) }),
+			]) {
+				const fetch = vi.fn(async () => new Response(buildSSEPayload({ status: "completed" })));
+				vi.stubGlobal("fetch", fetch);
+				const connect = vi.fn();
+				vi.stubGlobal(
+					"WebSocket",
+					class {
+						constructor() {
+							connect();
+							throw new Error("synthetic connection failure");
+						}
+					},
+				);
+				const result = await streamOpenAICodexResponses(model(), context(), {
+					apiKey: mockToken(),
+					transport,
+					fetch,
+					maxRetries: 3,
+					onPayload: hook,
+					requestIdentity: identity(),
+				}).result();
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toContain("Request identity");
+				expect(fetch).not.toHaveBeenCalled();
+				expect(connect).not.toHaveBeenCalled();
+			}
+		},
+	);
+
+	it("retains primitive pins across async hooks and refuses model/route mutation", async () => {
+		for (const field of ["id", "baseUrl"] as const) {
+			const requestModel = model();
+			const pin = identity();
+			const fetch = vi.fn(async () => new Response(buildSSEPayload({ status: "completed" })));
+			vi.stubGlobal("fetch", fetch);
+			const result = await streamOpenAICodexResponses(requestModel, context(), {
+				apiKey: mockToken(),
+				transport: "sse",
+				fetch,
+				requestIdentity: pin,
+				onPayload: async () => {
+					await Promise.resolve();
+					pin.model = "wrong";
+					requestModel[field] = "wrong";
+				},
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(fetch).not.toHaveBeenCalled();
+		}
+	});
+
+	it("allows same-model and non-model transformations on the final compressed body", async () => {
+		const records: unknown[] = [];
+		const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+			expect(init?.redirect).toBe("error");
+			expect(decodeCodexRequestBody(init?.body)).toMatchObject({ model: "gpt-6.1-sol", instructions: "allowed" });
+			return new Response(buildSSEPayload({ status: "completed" }));
+		});
+		vi.stubGlobal("fetch", fetch);
+		const result = await streamSimpleOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch,
+			requestIdentity: identity(),
+			onRequestAttempt: (record) => {
+				records.push(record);
+			},
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), instructions: "allowed" }),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(records).toEqual([
+			expect.objectContaining({ phase: "prepared", serializedModel: "gpt-6.1-sol", route, transport: "sse" }),
+			expect.objectContaining({ phase: "dispatched" }),
+			expect.objectContaining({ phase: "completed" }),
+		]);
+	});
+
+	it("refuses before transport when the synchronous attempt recorder fails", async () => {
+		const fetch = vi.fn();
+		vi.stubGlobal("fetch", fetch);
+		const result = await streamOpenAICodexResponses(model(), context(), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch,
+			requestIdentity: identity(),
+			onRequestAttempt: () => {
+				throw new Error("synthetic journal failure");
+			},
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it("retains first failed and already-aborted attempts without raw errors or body data", async () => {
+		for (const aborted of [false, true]) {
+			const records: Array<{ phase: string }> = [];
+			const controller = new AbortController();
+			if (aborted) controller.abort();
+			const fetch = vi.fn(async () => {
+				throw new Error("private error sentinel");
+			});
+			vi.stubGlobal("fetch", fetch);
+			const result = await streamOpenAICodexResponses(model(), context(), {
+				apiKey: mockToken(),
+				transport: "sse",
+				fetch,
+				signal: controller.signal,
+				requestIdentity: identity(),
+				onRequestAttempt: (record) => {
+					records.push(record);
+				},
+			}).result();
+			expect(result.stopReason).toBe(aborted ? "aborted" : "error");
+			expect(records.at(-1)?.phase).toBe(aborted ? "aborted" : "error");
+			expect(JSON.stringify(records)).not.toContain("private error sentinel");
+			expect(JSON.stringify(records)).not.toContain("synthetic");
+			expect(fetch).toHaveBeenCalledTimes(aborted ? 0 : 1);
+		}
+	});
+});
